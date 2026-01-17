@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/firq-core",
+  "crates/firq-async",
+  "crates/firq-tower",
+  "crates/firq-examples",
+  "crates/firq-bench",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/saulhs12/firq"
