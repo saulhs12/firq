@@ -1,0 +1,156 @@
+Firq es una librería open source en Rust para planificación (scheduling) de trabajo en sistemas concurrentes con enfoque en multi-tenant fairness, deadlines y backpressure, diseñada para mantener p99 estable bajo carga adversa y evitar el problema de noisy neighbor (un cliente/tenant/ruta acaparando recursos y degradando a los demás).
+
+Qué hace
+
+Firq se coloca entre “el lugar donde se genera trabajo” y “el lugar donde se ejecuta trabajo”:
+	•	Productores (handlers HTTP, consumers de eventos, cron jobs, etc.) encolan tareas.
+	•	Consumidores/Workers (threads o tareas async) decolan la siguiente tarea a ejecutar.
+	•	El scheduler decide cuál sale primero con reglas que garantizan:
+	1.	Fairness por tenant/clave (no starvation).
+	2.	Deadlines (tareas viejas/caducas se descartan o se marcan como expiradas).
+	3.	Backpressure (capacidad acotada y políticas de rechazo/caída controlada).
+	4.	Observabilidad (métricas de queue time y saturación).
+
+Para qué sirve (valor real)
+
+Firq sirve para estabilizar sistemas de alta concurrencia donde hay colas internas y picos de carga:
+	•	Evita que un tenant “hot” dispare el queue time p99 de los demás.
+	•	Mantiene memoria estable: impone límites de cola y políticas claras de degradación.
+	•	Permite aplicar SLO/SLA internos: deadlines y métricas de queue time.
+	•	Provee un componente reutilizable para backends, pipelines y sistemas realtime, sin amarrarse a un runtime específico.
+
+Problema que resuelve (noisy neighbor)
+
+En colas FIFO globales o colas sin control, un cliente o ruta “ruidosa” puede:
+	•	monopolizar workers,
+	•	inflar colas,
+	•	aumentar timeouts y reintentos,
+	•	provocar cascadas (más carga por retries),
+	•	y degradar el sistema completo.
+
+Firq introduce un control explícito de quién progresa y a qué ritmo, con límites y expiración.
+
+Conceptos clave
+
+Tenant/Key (clave de fairness)
+
+La fairness se aplica por una clave configurable, por ejemplo:
+	•	tenant_id (SaaS multi-tenant)
+	•	merchant_id (fintech/webhooks)
+	•	api_key (API pública)
+	•	route_id o (tenant_id, route_id) (gate por endpoint)
+	•	provider (downstreams externos)
+
+Task
+
+Una tarea incluye:
+	•	payload (tu trabajo real; genérico)
+	•	enqueue_ts (para medir queue time)
+	•	deadline opcional (expira si ya no sirve)
+	•	cost/peso (para fairness cuando el trabajo no cuesta lo mismo)
+	•	prioridad (futuro opcional)
+
+Fairness (scheduler)
+
+MVP orientado a DRR (Deficit Round Robin) por tenant:
+	•	cada tenant tiene una cola,
+	•	se asigna presupuesto por ronda (quantum),
+	•	se despacha proporcionalmente al presupuesto,
+	•	evita starvation y limita monopolio.
+DRR es eficiente y práctico para producción.
+
+Deadlines
+
+Al despachar:
+	•	si now > deadline, la tarea se considera expirada:
+	•	se descarta y se contabiliza, o
+	•	se devuelve como “expired” (según política).
+
+Backpressure
+
+Capacidades acotadas:
+	•	global (máximo total de tareas en memoria)
+	•	por tenant (máximo en cola por tenant)
+Políticas de degradación típicas:
+	•	Reject (rechazo inmediato)
+	•	DropOldest/DropNewest (por tenant o global)
+	•	Timeout (esperar X por capacidad)
+	•	ShedLowPriority (si hay prioridades)
+
+Modos de uso: sync y async (mismo core)
+
+Core runtime-agnostic (sync)
+
+El corazón de Firq es independiente de Tokio:
+	•	usable en threads tradicionales,
+	•	hot-path controlado,
+	•	latencia estable,
+	•	fácil de integrar en servicios legacy o componentes internos.
+
+Adaptador async (Tokio) encima
+
+Firq también soporta I/O masivo:
+	•	un dispatcher async consume tareas del core,
+	•	limita “in-flight” con semáforos,
+	•	ejecuta operaciones I/O async (HTTP/DB),
+	•	manteniendo fairness y backpressure.
+
+La regla de diseño: una sola lógica de scheduler (core) y adaptadores encima.
+
+Arquitectura general del proyecto (workspace)
+	•	firq-core
+	•	Toda la lógica: sharding, DRR, deadlines, backpressure, contadores y snapshots.
+	•	Sin dependencia a Tokio.
+	•	API base: enqueue, try_dequeue, dequeue_blocking (sync), stats.
+	•	firq-async
+	•	Adaptadores Tokio: dequeue_async, Stream/dispatcher, integración con semáforos.
+	•	No duplica el scheduler; solo adapta el “wakeup” y la ejecución.
+	•	firq-tower
+	•	Integración con Tower/Axum como middleware/layer.
+	•	Calcula tenant_key, decide encolar o aplicar backpressure, estandariza respuestas (429/503).
+	•	firq-examples
+	•	Ejemplos reales: webhook dispatcher, worker pool, gate por ruta, etc.
+	•	firq-bench
+	•	Herramientas y escenarios para medir throughput y p99 (hot tenant vs many tenants, overload, deadlines).
+
+Cómo lo usaría un cliente (flujo típico)
+	1.	Define tenant_key (qué entidad proteger).
+	2.	Crea un Scheduler con:
+	•	shards
+	•	límites globales y por tenant
+	•	quantum/pesos
+	•	política de backpressure
+	3.	En productores: enqueue(tenant_key, task):
+	•	si OK: responde 202 / acepta evento
+	•	si saturado: 429/503, o aplica policy
+	4.	En consumidores:
+	•	modo sync: threads con dequeue_blocking()
+	•	modo async: dispatcher con dequeue_async().await + límite de in-flight
+	5.	Observa métricas:
+	•	queue time p50/p95/p99
+	•	drops/expired
+	•	saturación y top tenants (futuro)
+
+Casos de uso principales
+	•	Webhooks/notifications multi-tenant
+	•	Worker pools internos (jobs)
+	•	Gate de concurrencia por endpoint/ruta
+	•	Fan-out hacia servicios externos
+	•	Pipelines de eventos (stream → procesamiento)
+	•	Sistemas realtime (chat/presence/juegos)
+	•	Tareas de mantenimiento con cuotas (background sin afectar tráfico)
+
+Diferenciador
+
+Firq no es solo “otra cola”: es un scheduler de servicio que combina, en un componente embebible:
+	•	fairness multi-tenant (evitar noisy neighbor),
+	•	deadlines (trabajo que ya no vale se elimina),
+	•	backpressure (degradación controlada y memoria estable),
+	•	y métricas orientadas a operar SLO (p99 de queue time).
+
+Metas técnicas (lo que se busca demostrar)
+	•	Alto throughput con contención baja (sharding).
+	•	p99 estable bajo carga adversa.
+	•	Políticas de degradación explícitas y medibles.
+	•	Diseño runtime-agnostic (core) + adaptadores (Tokio/Tower).
+	•	Uso correcto y justificable de atomics (métricas, señales, estados), sin “lock-free por ego”.
