@@ -44,63 +44,63 @@ Este documento define:
 Objetivo: una librería funcional, testeada, con ejemplos y microbench básicos.
 
 ### 1.1 API pública mínima (core)
-- [ ] `TenantKey` (hash estable, Copy/Clone, Eq/Hash).
-- [ ] `Task<T>` con:
-  - [ ] `enqueue_ts` (para queue_time)
-  - [ ] `deadline: Option<Instant>`
-  - [ ] `cost` (>= 1)
-- [ ] `SchedulerConfig`:
-  - [ ] `shards`, `max_global`, `max_per_tenant`, `quantum`, `backpressure=Reject`
-- [ ] `EnqueueResult` / `DequeueResult`:
-  - [ ] `enqueue` retorna rechazo explícito por saturación / tenant full / cerrado.
-  - [ ] `dequeue` solo retorna `Task`, `Empty`, `Closed` (las expiradas se descartan internamente).
-- [ ] `SchedulerStats` con:
-  - [ ] `enqueued`, `dequeued`, `dropped`, `expired`, `queue_len_estimate`, `queue_time_*`
+- [x] `TenantKey` (hash estable, Copy/Clone, Eq/Hash).
+- [x] `Task<T>` con:
+  - [x] `enqueue_ts` (para queue_time)
+  - [x] `deadline: Option<Instant>`
+  - [x] `cost` (>= 1)
+- [x] `SchedulerConfig`:
+  - [x] `shards`, `max_global`, `max_per_tenant`, `quantum`, `backpressure=Reject`
+- [x] `EnqueueResult` / `DequeueResult`:
+  - [x] `enqueue` retorna rechazo explícito por saturación / tenant full / cerrado.
+  - [x] `dequeue` solo retorna `Task`, `Empty`, `Closed` (las expiradas se descartan internamente).
+- [x] `SchedulerStats` con:
+  - [x] `enqueued`, `dequeued`, `dropped`, `expired`, `queue_len_estimate`, `queue_time_*`
 
 ### 1.2 Estructuras internas (core)
-- [ ] `TenantState`:
-  - [ ] `VecDeque<Task<T>>`
-  - [ ] `deficit` y `quantum`
-  - [ ] `active` flag
-- [ ] `active_ring` por shard:
-  - [ ] Inserta tenant cuando pasa de vacío → no vacío.
-  - [ ] Marca inactivo cuando queda vacío.
-- [ ] Sharding:
-  - [ ] `HashMap<TenantKey, TenantState>` por shard.
-  - [ ] `tenant -> shard = hash % shards`.
+- [x] `TenantState`:
+  - [x] `VecDeque<Task<T>>`
+  - [x] `deficit` y `quantum`
+  - [x] `active` flag
+- [x] `active_ring` por shard:
+  - [x] Inserta tenant cuando pasa de vacío → no vacío.
+  - [x] Marca inactivo cuando queda vacío.
+- [x] Sharding:
+  - [x] `HashMap<TenantKey, TenantState>` por shard.
+  - [x] `tenant -> shard = hash % shards`.
 
 ### 1.3 Algoritmo DRR (core)
-- [ ] Implementar selección DRR:
-  - [ ] `deficit += quantum` cuando no alcanza para el `cost` del frente.
-  - [ ] Entregar tarea cuando `deficit >= cost` y descontar.
-  - [ ] Reinsertar tenant al final del ring si sigue con cola.
+- [x] Implementar selección DRR:
+  - [x] `deficit += quantum` cuando no alcanza para el `cost` del frente.
+  - [x] Entregar tarea cuando `deficit >= cost` y descontar.
+  - [x] Reinsertar tenant al final del ring si sigue con cola.
 - [ ] Garantizar no-starvation (mediante tests).
 
 ### 1.4 Deadlines: DropExpired (core)
-- [ ] En `try_dequeue`:
-  - [ ] Antes de intentar despachar, limpiar expiradas del frente.
-  - [ ] Incrementar `expired` y ajustar `queue_len_estimate`.
-  - [ ] Nunca devolver una tarea expirada.
+- [x] En `try_dequeue`:
+  - [x] Antes de intentar despachar, limpiar expiradas del frente.
+  - [x] Incrementar `expired` y ajustar `queue_len_estimate`.
+  - [x] Nunca devolver una tarea expirada.
 
 ### 1.5 Backpressure: Reject (core)
-- [ ] En `enqueue`:
-  - [ ] Rechazar si `queue_len_estimate >= max_global`.
-  - [ ] Rechazar si `tenant_queue_len >= max_per_tenant`.
-  - [ ] Incrementar `dropped` cuando se rechaza.
+- [x] En `enqueue`:
+  - [x] Rechazar si `queue_len_estimate >= max_global`.
+  - [x] Rechazar si `tenant_queue_len >= max_per_tenant`.
+  - [x] Incrementar `dropped` cuando se rechaza.
 
 ### 1.6 Señalización sin polling (core)
-- [ ] Implementar evento “hay trabajo”:
-  - [ ] Notificar cuando entra trabajo (especialmente vacío → no vacío).
-  - [ ] `dequeue_blocking` espera sin busy-loop.
-  - [ ] Evitar “lost wakeups” (re-check antes de esperar).
+- [x] Implementar evento “hay trabajo”:
+  - [x] Notificar cuando entra trabajo (especialmente vacío → no vacío).
+  - [x] `dequeue_blocking` espera sin busy-loop.
+  - [x] Evitar “lost wakeups” (re-check antes de esperar).
 
 ### 1.7 Métricas mínimas (core)
-- [ ] Contadores atómicos:
-  - [ ] `enqueued`, `dequeued`, `dropped`, `expired`
-  - [ ] `queue_len_estimate`
-- [ ] Queue time:
-  - [ ] al entregar: `now - enqueue_ts`
-  - [ ] acumular `queue_time_sum_ns` y `queue_time_samples`
+- [x] Contadores atómicos:
+  - [x] `enqueued`, `dequeued`, `dropped`, `expired`
+  - [x] `queue_len_estimate`
+- [x] Queue time:
+  - [x] al entregar: `now - enqueue_ts`
+  - [x] acumular `queue_time_sum_ns` y `queue_time_samples`
 
 ### 1.8 Tests (core)
 - [ ] Unit tests:
