@@ -13,21 +13,27 @@
 //! - El core será runtime-agnostic (sin Tokio). Un adaptador async vivirá en `firq-async`.
 //! - La implementación posterior añadirá sharding, ring de tenants activos y señalización de “hay trabajo”.
 
+use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TenantKey(String);
+/// Clave de fairness (hash estable) usada para shard y DRR.
+///
+/// Nota: se espera que el caller provea un hash estable (por ejemplo, hash de tenant_id).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TenantKey(u64);
 
-impl From<&str> for TenantKey {
-    fn from(value: &str) -> Self {
-        Self(value.to_string())
+impl From<u64> for TenantKey {
+    fn from(value: u64) -> Self {
+        Self(value)
     }
 }
 
-impl From<String> for TenantKey {
-    fn from(value: String) -> Self {
-        Self(value)
+impl TenantKey {
+    fn as_u64(&self) -> u64 {
+        self.0
     }
 }
 
@@ -41,7 +47,103 @@ pub struct Task<T> {
     pub payload: T,
     pub enqueue_ts: Instant,
     pub deadline: Option<Instant>,
+    /// Costo de la tarea para DRR. Debe ser >= 1.
     pub cost: u64,
+}
+
+#[derive(Debug)]
+struct TenantState<T> {
+    queue: VecDeque<Task<T>>,
+    deficit: i64,
+    quantum: i64,
+    active: bool,
+}
+
+impl<T> TenantState<T> {
+    fn new(quantum: i64) -> Self {
+        Self {
+            queue: VecDeque::new(),
+            deficit: 0,
+            quantum,
+            active: false,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Shard<T> {
+    tenants: HashMap<TenantKey, TenantState<T>>,
+    active_ring: VecDeque<TenantKey>,
+}
+
+impl<T> Shard<T> {
+    fn new() -> Self {
+        Self {
+            tenants: HashMap::new(),
+            active_ring: VecDeque::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct StatsCounters {
+    enqueued: AtomicU64,
+    dequeued: AtomicU64,
+    expired: AtomicU64,
+    dropped: AtomicU64,
+    queue_len_estimate: AtomicU64,
+    queue_time_sum_ns: AtomicU64,
+    queue_time_samples: AtomicU64,
+}
+
+impl StatsCounters {
+    fn new() -> Self {
+        Self {
+            enqueued: AtomicU64::new(0),
+            dequeued: AtomicU64::new(0),
+            expired: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+            queue_len_estimate: AtomicU64::new(0),
+            queue_time_sum_ns: AtomicU64::new(0),
+            queue_time_samples: AtomicU64::new(0),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct WorkSignal {
+    mutex: Mutex<()>,
+    condvar: Condvar,
+    seq: AtomicU64,
+}
+
+impl WorkSignal {
+    fn new() -> Self {
+        Self {
+            mutex: Mutex::new(()),
+            condvar: Condvar::new(),
+            seq: AtomicU64::new(0),
+        }
+    }
+
+    fn current(&self) -> u64 {
+        self.seq.load(Ordering::Acquire)
+    }
+
+    fn notify_all(&self) {
+        self.seq.fetch_add(1, Ordering::Release);
+        self.condvar.notify_all();
+    }
+
+    fn wait_for_change(&self, last_seen: u64) {
+        let mut guard = self.mutex.lock().expect("work signal mutex poisoned");
+        while self.seq.load(Ordering::Acquire) == last_seen {
+            guard = self
+                .condvar
+                .wait(guard)
+                .expect("work signal condvar poisoned");
+        }
+    }
 }
 
 /// Configuración del scheduler.
@@ -73,15 +175,16 @@ pub enum BackpressurePolicy {
 #[derive(Clone, Debug)]
 pub enum EnqueueResult {
     Enqueued,
-    Rejected(EnqueueError),
+    Rejected(EnqueueRejectReason),
     Closed,
 }
 
 #[derive(Clone, Debug)]
-pub enum EnqueueError {
-    Backpressure,
-    Full,
-    Invalid,
+pub enum EnqueueRejectReason {
+    /// Capacidad global excedida.
+    GlobalFull,
+    /// Capacidad por tenant excedida.
+    TenantFull,
 }
 
 #[derive(Clone, Debug)]
@@ -97,13 +200,13 @@ pub enum DequeueResult<T> {
 #[derive(Clone, Debug, Default)]
 pub struct SchedulerStats {
     /// Total de tareas aceptadas en cola.
-    pub total_enqueued: u64,
+    pub enqueued: u64,
     /// Total de tareas entregadas a consumidores.
-    pub total_dequeued: u64,
+    pub dequeued: u64,
     /// Total de tareas descartadas por expiración (DropExpired en dequeue).
-    pub total_expired: u64,
-    /// Total de tareas rechazadas por backpressure (Reject) u otras causas de drop (futuras).
-    pub total_dropped: u64,
+    pub expired: u64,
+    /// Total de tareas rechazadas por backpressure (Reject).
+    pub dropped: u64,
     /// Estimación del tamaño total de cola (tareas pendientes). En v0.1 será aproximada.
     pub queue_len_estimate: u64,
     /// Suma acumulada del queue_time (nanosegundos) de tareas entregadas.
@@ -115,13 +218,26 @@ pub struct SchedulerStats {
 
 pub struct Scheduler<T> {
     config: SchedulerConfig,
+    shards: Vec<Mutex<Shard<T>>>,
+    stats: StatsCounters,
+    work_signal: WorkSignal,
+    closed: AtomicBool,
     _marker: PhantomData<T>,
 }
 
 impl<T> Scheduler<T> {
     pub fn new(config: SchedulerConfig) -> Self {
+        let shard_count = config.shards.max(1);
+        let mut shards = Vec::with_capacity(shard_count);
+        for _ in 0..shard_count {
+            shards.push(Mutex::new(Shard::new()));
+        }
         Self {
             config,
+            shards,
+            stats: StatsCounters::new(),
+            work_signal: WorkSignal::new(),
+            closed: AtomicBool::new(false),
             _marker: PhantomData,
         }
     }
