@@ -1,5 +1,3 @@
-
-
 # Firq — Roadmap
 
 Este documento define:
@@ -36,6 +34,11 @@ Este documento define:
   - `firq-bench`
 
 > Si aún no están creados los crates/archivos, este roadmap asume esa estructura como base.
+
+Decisión arquitectónica explícita:
+- `firq-async` se construye exclusivamente sobre Tokio.
+- Tower NO es dependencia del core ni del async layer.
+- Tower se usa solo como integración opcional en `firq-tower`.
 
 ---
 
@@ -112,18 +115,58 @@ Objetivo: una librería funcional, testeada, con ejemplos y microbench básicos.
   - [x] Invariante: `queue_len_estimate` nunca negativo.
   - [x] Invariante: `dequeued + expired + dropped <= enqueued + dropped` (según definición exacta).
 
-### 1.9 `firq-async` (adaptador Tokio)
-- [ ] `AsyncScheduler<T>` que wrappea `Arc<Scheduler<T>>`.
-- [ ] `dequeue_async().await` usando la señalización del core (sin polling).
-- [ ] (Opcional en v0.1) Dispatcher simple:
-  - [ ] Límite de in-flight con `Semaphore`.
+### 1.9 `firq-async` (adaptador Tokio, alcance explícito)
+
+Alcance del crate:
+- `firq-async` NO implementa algoritmos de scheduling.
+- `firq-async` NO redefine fairness, backpressure ni deadlines.
+- `firq-async` es únicamente un adaptador async sobre `firq-core`.
+
+Decisiones técnicas cerradas (v0.1):
+- Runtime obligatorio: **Tokio**.
+- No dependencia de Tower en este crate.
+- API async estable, mínima y predecible.
+
+Responsabilidades:
+- Exponer una API async mínima (`dequeue_async`) sobre `Scheduler`.
+- Integrarse con la señalización del core sin polling.
+- Facilitar ejecución concurrente controlada (in‑flight).
+
+Componentes mínimos a implementar:
+- [x] `AsyncScheduler<T>`:
+      - wrappea `Arc<Scheduler<T>>`
+      - clonable y `Send + Sync`
+- [x] `enqueue(&self, tenant, task) -> EnqueueResult`
+      - delega directamente al core (no lógica adicional)
+- [x] `dequeue_async(&self) -> DequeueResult<T>`
+      - espera async hasta que:
+          - haya trabajo
+          - el scheduler esté cerrado
+      - puente a `dequeue_blocking` con `spawn_blocking` (sin polling)
+- [x] `AsyncReceiver` / `AsyncStream`
+      - `recv().await` y `Stream<Item = DequeueItem<T>>`
+- [x] Integración con señalización del core:
+      - puente a `dequeue_blocking` con `spawn_blocking`
+
+Concurrencia (v0.1):
+- [x] Dispatcher opcional:
+      - workers con `tokio::spawn`
+      - límite de in‑flight usando `tokio::sync::Semaphore`
+      - sin retries automáticos
+      - sin prioridades adicionales
+
+Explícitamente fuera de alcance en v0.1:
+- Timeouts de enqueue.
+- Cancelación de tareas en ejecución.
+- Integración HTTP / RPC.
+- Métricas async adicionales (solo se exponen las del core).
 
 ### 1.10 Ejemplos (`firq-examples`)
-- [ ] Ejemplo sync:
-  - [ ] 2+ tenants, uno hot, demostrar fairness.
-  - [ ] imprimir stats al final.
-- [ ] Ejemplo async:
-  - [ ] productor async + consumidor async con `dequeue_async`.
+- [x] Ejemplo sync:
+  - [x] 2+ tenants, uno hot, demostrar fairness.
+  - [x] imprimir stats al final.
+- [x] Ejemplo async:
+  - [x] productor async + consumidor async con `dequeue_async`.
 
 ### 1.11 Bench (`firq-bench`)
 - [ ] Escenario “hot tenant vs many tenants”:
@@ -168,17 +211,30 @@ Objetivo: una librería funcional, testeada, con ejemplos y microbench básicos.
 - [ ] Mejoras en estructuras (ring más eficiente, reuso de allocations).
 - [ ] Benchmarks comparativos (baseline FIFO vs Firq).
 
-### 2.6 `firq-tower` completo
-- [ ] Layer configurable:
-  - [ ] extracción de tenant key
-  - [ ] límites por ruta
-  - [ ] respuestas 429/503 + headers
-- [ ] Ejemplo Axum end-to-end.
+### 2.6 `firq-tower` (integración Tower / HTTP – post‑MVP)
 
-### 2.7 Casos de uso “producto”
-- [ ] Webhook dispatcher completo.
-- [ ] Fan-out service example.
-- [ ] Gate de concurrencia por endpoint.
+Estado:
+- NO forma parte del MVP v0.1.
+- Se implementa únicamente después de estabilizar `firq-core` y `firq-async`.
+
+Rol del crate:
+- Adaptador entre Tower (`Service`, `Layer`) y `firq-async`.
+- Permite usar Firq como middleware en stacks HTTP/RPC (Axum, Hyper).
+
+Responsabilidades:
+- Extraer `TenantKey` desde:
+      - headers
+      - path
+      - extensión del request
+      - closure definida por el usuario
+- Encolar requests como `Task`.
+- Esperar dequeue y ejecutar el handler real.
+- Traducir rechazos a respuestas HTTP (429 / 503).
+
+Explícitamente fuera de alcance:
+- Lógica de scheduling.
+- Gestión de runtime async.
+- Métricas propias (solo expone las del core).
 
 ---
 

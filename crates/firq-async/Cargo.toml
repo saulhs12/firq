@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+firq-core = { path = "../firq-core" }
+futures-core = "0.3"
+tokio = { version = "1", features = ["rt", "sync"] }

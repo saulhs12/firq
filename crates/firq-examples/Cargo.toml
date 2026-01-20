@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 firq-core = { path = "../firq-core" }
+firq-async = { path = "../firq-async" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
