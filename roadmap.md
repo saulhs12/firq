@@ -103,14 +103,14 @@ Objetivo: una librería funcional, testeada, con ejemplos y microbench básicos.
   - [x] acumular `queue_time_sum_ns` y `queue_time_samples`
 
 ### 1.8 Tests (core)
-- [ ] Unit tests:
-  - [ ] No entrega expiradas.
-  - [ ] Rechaza por `max_global`.
-  - [ ] Rechaza por `max_per_tenant`.
-  - [ ] Fairness básica: tenant B progresa aun si A está “hot”.
-- [ ] Property tests (proptest) básicos:
-  - [ ] Invariante: `queue_len_estimate` nunca negativo.
-  - [ ] Invariante: `dequeued + expired + dropped <= enqueued + dropped` (según definición exacta).
+- [x] Unit tests:
+  - [x] No entrega expiradas.
+  - [x] Rechaza por `max_global`.
+  - [x] Rechaza por `max_per_tenant`.
+  - [x] Fairness básica: tenant B progresa aun si A está “hot”.
+- [x] Property tests (proptest) básicos:
+  - [x] Invariante: `queue_len_estimate` nunca negativo.
+  - [x] Invariante: `dequeued + expired + dropped <= enqueued + dropped` (según definición exacta).
 
 ### 1.9 `firq-async` (adaptador Tokio)
 - [ ] `AsyncScheduler<T>` que wrappea `Arc<Scheduler<T>>`.
