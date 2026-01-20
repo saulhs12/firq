@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -37,7 +37,7 @@ async fn main() {
     }));
     let async_scheduler = AsyncScheduler::new(Arc::clone(&scheduler));
 
-    let tenants = vec![
+    let tenants = [
         TenantConfig {
             key: TenantKey::from(1),
             name: "hot",
@@ -108,7 +108,6 @@ async fn main() {
                         served[*index].fetch_add(1, Ordering::Relaxed);
                     }
                     tokio::time::sleep(Duration::from_millis(15)).await;
-                    drop(item.task);
                 }
             })
             .await;
@@ -134,10 +133,7 @@ async fn main() {
     for (idx, tenant) in tenants.iter().enumerate() {
         let p = produced[idx].load(Ordering::Relaxed);
         let s = served[idx].load(Ordering::Relaxed);
-        println!(
-            "tenant={} produced={} served={}",
-            tenant.name, p, s
-        );
+        println!("tenant={} produced={} served={}", tenant.name, p, s);
     }
     println!("dropped_total={}", dropped.load(Ordering::Relaxed));
 }

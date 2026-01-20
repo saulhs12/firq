@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -32,7 +32,6 @@ struct TenantProfile {
 
 #[derive(Clone, Debug)]
 struct PipelineJob {
-    bytes_kb: u64,
     stage_ms: [u64; 4],
 }
 
@@ -192,7 +191,6 @@ fn spawn_producers(state: Arc<ExampleState>) -> Vec<thread::JoinHandle<()>> {
                 counter += 1;
                 let bytes_kb = plan.base_kb + (counter % (plan.jitter_kb + 1));
                 let job = PipelineJob {
-                    bytes_kb,
                     stage_ms: pipeline_stage_ms(bytes_kb),
                 };
                 let task = Task {
@@ -203,7 +201,10 @@ fn spawn_producers(state: Arc<ExampleState>) -> Vec<thread::JoinHandle<()>> {
                 };
                 produced_total.fetch_add(1, Ordering::Relaxed);
                 record_count(&produced_by_tenant, tenant_index);
-                if matches!(scheduler.enqueue(tenant_key, task), EnqueueResult::Rejected(_)) {
+                if matches!(
+                    scheduler.enqueue(tenant_key, task),
+                    EnqueueResult::Rejected(_)
+                ) {
                     dropped_total.fetch_add(1, Ordering::Relaxed);
                 }
                 sleep_us(plan.submit_every_us);
@@ -213,10 +214,7 @@ fn spawn_producers(state: Arc<ExampleState>) -> Vec<thread::JoinHandle<()>> {
     handles
 }
 
-fn spawn_workers(
-    state: Arc<ExampleState>,
-    worker_count: usize,
-) -> Vec<thread::JoinHandle<()>> {
+fn spawn_workers(state: Arc<ExampleState>, worker_count: usize) -> Vec<thread::JoinHandle<()>> {
     let mut workers = Vec::with_capacity(worker_count);
     for _ in 0..worker_count {
         let scheduler = Arc::clone(&state.scheduler);
@@ -261,13 +259,7 @@ fn spawn_logger(state: Arc<ExampleState>, interval_s: u64) -> thread::JoinHandle
             let (batch, etl, api) = tier_counts(&profiles, &served_by_tenant);
             println!(
                 "[t+{}s] enq={} deq={} qlen={} served_batch={} served_etl={} served_api={}",
-                tick,
-                stats.enqueued,
-                stats.dequeued,
-                stats.queue_len_estimate,
-                batch,
-                etl,
-                api
+                tick, stats.enqueued, stats.dequeued, stats.queue_len_estimate, batch, etl, api
             );
             println!(
                 "         produced={} dropped={}",
@@ -305,10 +297,7 @@ fn record_count(map: &Arc<Mutex<Vec<u64>>>, index: usize) {
     }
 }
 
-fn tier_counts(
-    profiles: &[TenantProfile],
-    counts: &Arc<Mutex<Vec<u64>>>,
-) -> (u64, u64, u64) {
+fn tier_counts(profiles: &[TenantProfile], counts: &Arc<Mutex<Vec<u64>>>) -> (u64, u64, u64) {
     let counts = counts.lock().expect("count map poisoned");
     let mut batch = 0u64;
     let mut etl = 0u64;
@@ -372,10 +361,7 @@ fn print_summary(state: &ExampleState, run_seconds: u64) {
     println!("workers busy: {}%", busy_pct);
 
     let (batch, etl, api) = tier_counts(&state.tenant_profiles, &state.served_by_tenant);
-    println!(
-        "served totals: batch={} etl={} api={}",
-        batch, etl, api
-    );
+    println!("served totals: batch={} etl={} api={}", batch, etl, api);
 
     let mut served = state
         .served_by_tenant

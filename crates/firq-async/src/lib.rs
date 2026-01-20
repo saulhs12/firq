@@ -3,10 +3,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use firq_core::SchedulerStats;
 pub use firq_core::{
     BackpressurePolicy, DequeueResult, EnqueueResult, Scheduler, SchedulerConfig, Task, TenantKey,
 };
-use firq_core::{SchedulerStats};
 use futures_core::Stream;
 use tokio::sync::Semaphore;
 
@@ -191,9 +191,6 @@ impl<T: Send + Sync + 'static> Dispatcher<T> {
             }
         }
 
-        let _ = self
-            .semaphore
-            .acquire_many(self.max_in_flight as u32)
-            .await;
+        let _ = self.semaphore.acquire_many(self.max_in_flight as u32).await;
     }
 }

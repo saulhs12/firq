@@ -131,6 +131,7 @@ Responsabilidades:
 - Exponer una API async mínima (`dequeue_async`) sobre `Scheduler`.
 - Integrarse con la señalización del core sin polling.
 - Facilitar ejecución concurrente controlada (in‑flight).
+- Re-exportar tipos comunes del core para ergonomía (uso solo `firq-async`).
 
 Componentes mínimos a implementar:
 - [x] `AsyncScheduler<T>`:
@@ -147,6 +148,8 @@ Componentes mínimos a implementar:
       - `recv().await` y `Stream<Item = DequeueItem<T>>`
 - [x] Integración con señalización del core:
       - puente a `dequeue_blocking` con `spawn_blocking`
+- [x] Re-exports de tipos del core:
+      - `Task`, `TenantKey`, `Scheduler`, `SchedulerConfig`, `BackpressurePolicy`, `EnqueueResult`, `DequeueResult`
 
 Concurrencia (v0.1):
 - [x] Dispatcher opcional:
@@ -167,6 +170,7 @@ Explícitamente fuera de alcance en v0.1:
   - [x] imprimir stats al final.
 - [x] Ejemplo async:
   - [x] productor async + consumidor async con `dequeue_async`.
+  - [x] imports solo desde `firq-async` (sin `firq-core`).
 
 ### 1.11 Bench (`firq-bench`)
 - [ ] Escenario “hot tenant vs many tenants”:

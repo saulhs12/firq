@@ -114,6 +114,40 @@ fn fairness_allows_cold_tenant_to_progress() {
     assert!(saw_cold, "cold tenant should make progress under DRR");
 }
 
+#[test]
+fn no_starvation_with_large_costs() {
+    let scheduler = Scheduler::new(config(1_000, 1_000));
+    let hot = TenantKey::from(10);
+    let heavy = TenantKey::from(20);
+
+    for i in 0..50 {
+        let mut task = task(i, None);
+        task.cost = 1;
+        let _ = scheduler.enqueue(hot, task);
+    }
+
+    let mut heavy_task = task(9_999, None);
+    heavy_task.cost = 10;
+    let _ = scheduler.enqueue(heavy, heavy_task);
+
+    let mut saw_heavy = false;
+    for _ in 0..60 {
+        match scheduler.try_dequeue() {
+            DequeueResult::Task { tenant, .. } if tenant == heavy => {
+                saw_heavy = true;
+                break;
+            }
+            DequeueResult::Task { .. } => {}
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_heavy,
+        "heavy tenant should not starve even with small quantum"
+    );
+}
+
 proptest! {
     #[test]
     fn counters_stay_consistent(ops in prop::collection::vec(op_strategy(), 1..200)) {

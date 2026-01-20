@@ -13,15 +13,15 @@
 //! - El core será runtime-agnostic (sin Tokio). Un adaptador async vivirá en `firq-async`.
 //! - La implementación posterior añadirá sharding, ring de tenants activos y señalización de “hay trabajo”.
 
-mod state;
-mod scheduler;
 mod api;
+mod scheduler;
+mod state;
 
-pub use scheduler::Scheduler;
 pub use api::{
     BackpressurePolicy, DequeueResult, EnqueueRejectReason, EnqueueResult, SchedulerConfig,
     SchedulerStats, Task, TenantKey,
 };
+pub use scheduler::Scheduler;
 
 #[cfg(test)]
 mod tests;

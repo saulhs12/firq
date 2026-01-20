@@ -1,13 +1,13 @@
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use crate::state::{Shard, StatsCounters, TenantState, WorkSignal};
 use crate::api::{
     DequeueResult, EnqueueRejectReason, EnqueueResult, SchedulerConfig, SchedulerStats, Task,
     TenantKey,
 };
+use crate::state::{Shard, StatsCounters, TenantState, WorkSignal};
 
 pub struct Scheduler<T> {
     config: SchedulerConfig,
@@ -101,7 +101,9 @@ impl<T> Scheduler<T> {
         }
 
         self.stats.enqueued.fetch_add(1, Ordering::Relaxed);
-        self.stats.queue_len_estimate.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .queue_len_estimate
+            .fetch_add(1, Ordering::Relaxed);
 
         drop(shard);
 
@@ -219,7 +221,7 @@ impl<T> Scheduler<T> {
             let observed = self.work_signal.current();
             match self.try_dequeue() {
                 DequeueResult::Task { tenant, task } => {
-                    return DequeueResult::Task { tenant, task }
+                    return DequeueResult::Task { tenant, task };
                 }
                 DequeueResult::Closed => return DequeueResult::Closed,
                 DequeueResult::Empty => {
@@ -227,12 +229,7 @@ impl<T> Scheduler<T> {
                         return DequeueResult::Closed;
                     }
 
-                    if self
-                        .stats
-                        .queue_len_estimate
-                        .load(Ordering::Acquire)
-                        > 0
-                    {
+                    if self.stats.queue_len_estimate.load(Ordering::Acquire) > 0 {
                         // Hay trabajo pendiente pero aun no elegible (e.g. DRR); reintentar.
                         continue;
                     }
