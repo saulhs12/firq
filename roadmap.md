@@ -280,7 +280,124 @@ Explícitamente fuera de alcance:
 
 ---
 
-## 5) Definición de “MVP completo” (criterios de salida)
+## 5) Cierre técnico hacia v1 (producción)
+
+Objetivo de esta etapa:
+- Pasar de “funciona en casos felices” a “correcto, estable y operable bajo carga adversa”.
+- Cerrar riesgos de concurrencia que impactan fairness real, backpressure efectivo y tail latency.
+- Establecer criterios de aceptación cuantitativos para validar p95/p99 y resiliencia.
+
+### 5.1 Blockers de correctness y concurrencia (prioridad crítica)
+- [x] Corregir la carrera de activación/desactivación de shard en el core (`active_shards` + `shard_active`) para eliminar la posibilidad de trabajo encolado no visible temporalmente para consumidores.
+- [x] Reemplazar el control global de capacidad basado en `load` + verificación por un mecanismo de admisión estricta (CAS de reserva o semáforo global) que garantice `queue_len_estimate <= max_global` incluso con múltiples productores concurrentes.
+- [x] Definir y documentar un invariante formal de estado activo por shard: “si existe al menos una cola no vacía en el shard, el shard debe estar presente en el ring global o marcado para reactivación atómica”.
+- [x] Agregar pruebas de estrés multi-shard (productores/consumidores concurrentes) que reproduzcan y prevengan regresiones de los dos puntos anteriores.
+- [x] Validar ausencia de livelock bajo combinación de `cost` alto + `quantum` bajo + expiraciones frecuentes.
+
+### 5.2 Semántica de `firq-tower` para fairness/backpressure efectivo
+- [x] Alinear `firq-tower` con control de in-flight real del handler para que la admisión no sea solo “permiso lógico” sino límite efectivo de ejecución concurrente.
+- [x] Agregar cancelación explícita de trabajo encolado cuando el request se aborta/desconecta antes de obtener turno.
+- [x] Propagar deadlines del request al `Task.deadline` y mapear expiración a respuesta HTTP configurable.
+- [x] Definir mapeo configurable de rechazo por política (`GlobalFull`, `TenantFull`, timeout) a códigos HTTP (`429`, `503`) con cuerpo estructurado estable.
+- [x] Documentar contrato de integración Tower/Axum respecto a `poll_ready`, backpressure y orden de ejecución.
+
+### 5.3 Hardening de `firq-async`
+- [x] Incorporar tests unitarios e integración para `AsyncScheduler`, `AsyncReceiver`, `AsyncStream` y `Dispatcher`.
+- [x] Verificar semántica de cierre: `close()` debe drenar/terminar sin tareas huérfanas ni esperas indefinidas.
+- [x] Definir y probar comportamiento de `Dispatcher` ante panic/fallo del handler para evitar fuga de permisos.
+- [x] Medir y documentar costo de `spawn_blocking` por dequeue bajo alta concurrencia.
+
+### 5.4 Observabilidad de operación (SLO/SLA)
+- [x] Expandir `SchedulerStats` con contadores por causa: `rejected_global`, `rejected_tenant`, `dropped_policy`, `timeout_rejected`.
+- [x] Agregar señal explícita de saturación (`queue_len/max_global`, `in_flight/max_in_flight`) para alerting.
+- [x] Mantener histograma de queue time como fuente de verdad de percentiles y documentar precisión/limitaciones.
+- [x] Añadir ejemplos de dashboard Prometheus para p50/p95/p99 y top talkers.
+
+### 5.5 Benchmarks de cierre (evidencia de estabilidad p99)
+- [x] Definir suite reproducible de escenarios: hot tenant sostenido, burst masivo, mezcla de prioridades, expiración por deadline y presión de capacidad.
+- [x] Reportar `throughput`, `drop rate`, `expired rate`, `queue_time p50/p95/p99` por escenario.
+- [x] Comparar Firq vs baseline FIFO bajo la misma carga y publicar metodología exacta (parámetros, duración, workers, hardware).
+- [x] Establecer umbrales de aceptación para declarar estabilidad de p99 bajo carga adversa.
+
+### 5.6 Calidad y CI (estado real vs checklist)
+- [x] Reconciliar checklist de calidad con el estado real de CI y corregir cualquier ítem marcado como completado sin evidencia actual.
+- [x] Dejar verde: `cargo fmt --all -- --check`.
+- [x] Dejar verde: `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
+- [x] Dejar verde: tests dirigidos por crate/escenario (`firq-core`, `firq-async`, `firq-tower` integración).
+- [x] Refactorizar `firq-bench` para cumplir clippy estricto sin `allow` global.
+
+### 5.7 Preparación de release y publicación
+- [x] Completar metadata de `Cargo.toml` en todos los crates: `description`, `license`, `repository`, `documentation`, `homepage` (si aplica), `readme`, `keywords`, `categories`.
+- [x] Asegurar que dependencias internas `path` tengan también `version` para empaquetado/publicación.
+- [x] Validar empaquetado local por crate con `cargo package --allow-dirty --no-verify` y resolver bloqueos.
+- [x] Definir política semver y changelog de release.
+- [x] Publicar guía de migración para cambios de API entre v0.x y v1.
+
+### 5.8 Cambios de API públicos planificados
+- [x] Agregar API de cancelación de tareas pendientes (`enqueue_with_handle` + `cancel`) para integraciones HTTP y shutdown robusto.
+- [x] Agregar variante de cierre configurable (`close_immediate` / `close_drain`) manteniendo `close()` por compatibilidad.
+- [x] Extender builder de `firq-tower` con límites de in-flight, extractor de deadline y mapeador de rechazos.
+- [x] Documentar garantías de compatibilidad y estrategia de deprecación.
+
+### 5.9 Estrategia de pruebas de aceptación (gate de v1)
+- [x] Pruebas de concurrencia intensiva con `shards > 1`, múltiples productores y consumidores.
+- [x] Pruebas de no-starvation con tenants “hot” y “cold” mezclando `cost` heterogéneo.
+- [x] Pruebas de exactitud de métricas para enqueue/dequeue/drop/expire bajo carrera.
+- [x] Pruebas de integración Tower/Axum con cancelación de cliente y deadlines.
+- [x] Pruebas de robustez de cierre con consumidores bloqueados y dispatcher async activo.
+
+### 5.10 Definition of Done de v1
+- [ ] No existen violaciones observadas de invariantes de cola en pruebas de estrés prolongadas.
+- [ ] `clippy -D warnings`, `fmt --check` y `test --workspace` pasan en CI de forma consistente.
+- [ ] Benchmarks documentados muestran mejora clara frente a FIFO en escenarios noisy-neighbor.
+- [ ] API pública y semántica de métricas están documentadas con precisión y ejemplos ejecutables.
+- [ ] Crates listos para publicación y versionado coherente del workspace.
+
+### 5.11 Cambios importantes en interfaces públicas (a reflejar en roadmap)
+1. `Scheduler`: APIs de cancelación y cierre con modo de drenado.
+2. `SchedulerStats`: contadores desagregados por causa de rechazo/drop/timeout.
+3. `firq-tower::Firq` builder: `in_flight_limit`, extractor de deadline y mapeador HTTP de rechazo.
+
+### 5.12 Casos de prueba que deben quedar explícitos en roadmap
+1. Estrés concurrente multi-shard con productores/consumidores simultáneos.
+2. Invariantes de capacidad global bajo carrera.
+3. No-starvation con `cost` heterogéneo y prioridades mezcladas.
+4. Cancelación de request en integración Axum/Tower.
+5. Cierre ordenado con workers sync y dispatcher async activos.
+
+### 5.13 Supuestos y defaults elegidos
+1. Alcance objetivo: librería in-process single-node (no cola distribuida/persistente).
+2. Runtime async objetivo: Tokio.
+3. En v1, correctness y semántica operacional tienen prioridad sobre microoptimizaciones.
+4. En este cierre se permiten breaking changes controlados para acelerar hardening técnico.
+
+---
+
+## 6) Milestones de cierre (nuevos)
+
+### Milestone D — Correctness & Concurrency
+- Corregidos blockers de activación de shard y admisión global estricta.
+- Tests multi-shard de estrés en verde.
+- Invariantes documentados y verificados.
+
+### Milestone E — Tower/Async Production Semantics
+- `firq-tower` con control de in-flight real y cancelación.
+- Deadlines propagadas desde request.
+- Integración y contratos HTTP documentados.
+
+### Milestone F — Observabilidad & Performance Evidence
+- Métricas extendidas por causa.
+- Bench suite reproducible con p50/p95/p99.
+- Reporte comparativo Firq vs FIFO publicado.
+
+### Milestone G — Release Readiness
+- CI completamente verde con gates estrictos.
+- Metadata y empaquetado de crates listos.
+- Changelog, semver y documentación de uso/migración completos.
+
+---
+
+## 7) Definición de “MVP completo” (criterios de salida)
 
 El MVP v0.1 se considera completo cuando:
 

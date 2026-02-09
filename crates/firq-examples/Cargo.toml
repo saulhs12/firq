@@ -2,11 +2,19 @@
 name = "firq-examples"
 version = "0.1.0"
 edition = "2024"
+description = "Executable examples for Firq core, async, and Tower integrations"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/saulhs12/firq"
+documentation = "https://github.com/saulhs12/firq/tree/main/crates/firq-examples"
+homepage = "https://github.com/saulhs12/firq"
+readme = "../../README.md"
+keywords = ["examples", "scheduler", "tower", "axum", "tokio"]
+categories = ["asynchronous", "concurrency", "web-programming"]
 
 [dependencies]
-firq-core = { path = "../firq-core" }
-firq-async = { path = "../firq-async" }
-firq-tower = { path = "../firq-tower" }
+firq-core = { path = "../firq-core", version = "0.1.0" }
+firq-async = { path = "../firq-async", version = "0.1.0" }
+firq-tower = { path = "../firq-tower", version = "0.1.0" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net"] }
 axum = "0.7"
 serde_json = "1.0"

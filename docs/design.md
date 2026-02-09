@@ -300,10 +300,13 @@ El core expone un mecanismo para:
 ## Invariantes que deben mantenerse
 
 1) Nunca entregar tareas expiradas (DropExpired estricto).
-2) Cumplir backpressure (Reject) a nivel global y por tenant.
-3) Un tenant activo con trabajo progresa (no starvation).
-4) `queue_len_estimate` consistente (no negativo; se ajusta con enqueue/dequeue/expired).
-5) Al `close()`, consumidores bloqueados se despiertan y retornan `Closed`.
+2) Capacidad global estricta: `queue_len_estimate <= max_global` bajo concurrencia.
+3) Invariante formal de shard activo:
+   si existe al menos una cola no vacia en un shard, ese shard debe estar en el ring global
+   (`active_shards`) o marcado para reactivacion atomica (`shard_active=true`).
+4) Un tenant activo con trabajo progresa (no starvation).
+5) Al `close_immediate()`, consumidores bloqueados se despiertan y retornan `Closed`.
+6) Al `close_drain()`, no se admiten nuevas tareas y se drena hasta vaciar `queue_len_estimate`.
 
 ---
 

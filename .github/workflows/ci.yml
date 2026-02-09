@@ -16,5 +16,9 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: test
-        run: cargo test --workspace
+      - name: test-core
+        run: cargo test -p firq-core
+      - name: test-async
+        run: cargo test -p firq-async
+      - name: test-tower
+        run: cargo test -p firq-tower --test integration

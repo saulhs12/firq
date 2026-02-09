@@ -1,186 +1,113 @@
-# Firq + Axum - Guía de Integración
+# Firq + Axum / Tower — Integracion de produccion
 
-Este documento explica cómo integrar **Firq** en tu API REST con Axum para aplicar rate limiting y fairness multi-tenant.
+Este documento define el contrato operativo de `firq-tower` para Axum/Tower en v1:
 
-## Ejemplo Completo: `axum_simple.rs`
+- Fairness y backpressure pasan por `firq-core`.
+- `firq-tower` integra:
+  - extraccion de tenant,
+  - cancelacion de request antes de turno,
+  - deadlines por request,
+  - mapeo HTTP estable de rechazos,
+  - limite real de ejecucion concurrente del handler (`in_flight`).
 
-### 1. Configurar el Scheduler
+## Contrato de ejecucion
 
-```rust
-use firq_async::{AsyncScheduler, Scheduler, SchedulerConfig};
+1. `poll_ready`
+- `FirqService::poll_ready` delega al servicio interior.
+- No encola trabajo; solo refleja readiness del servicio real.
 
-let config = SchedulerConfig {
-    shards: 4,                    // Shards para reducir contención
-    max_global: 100,             // Máximo 100 requests en cola
-    max_per_tenant: 10,          // Máximo 10 requests por tenant
-    quantum: 10,                 // Presupuesto DRR
-    backpressure: firq_async::BackpressurePolicy::Reject,
-    ..Default::default()
-};
+2. `call`
+- Extrae `TenantKey`.
+- Construye `Task` con `deadline` (si existe extractor).
+- Encola usando `enqueue_with_handle`.
 
-let scheduler = AsyncScheduler::new(Arc::new(Scheduler::new(config)));
-```
+3. Espera de turno
+- El request espera un permiso por `oneshot`.
+- Si el cliente aborta antes de recibir permiso, el `Drop` del future cancela el `TaskHandle`.
 
-### 2. Crear la Aplicación Axum
+4. Ejecucion del handler
+- Tras recibir turno, el middleware adquiere un permiso de `Semaphore` (`in_flight_limit`).
+- El handler corre manteniendo ese permiso hasta completar.
 
-```rust
-let app = Router::new()
-    .route("/", get(my_handler))
-    .with_state(AppState { scheduler });
-```
+## Mapeo HTTP default de rechazo
 
-### 3. Extraer el Tenant ID de los Requests
+`firq-tower` expone un mapper configurable. El default v1 es:
 
-```rust
-fn extract_tenant(req: &Request) -> TenantKey {
-    req.headers()
-        .get("X-Tenant-ID")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(TenantKey::from)
-        .unwrap_or(TenantKey::from(0))  // Default si no hay header
-}
-```
+- `TenantFull` -> `429`
+- `GlobalFull` -> `503`
+- `Timeout` -> `503`
 
-### 4. Solicitar permiso antes de procesar
+## Schema JSON estable de rechazo
 
-```rust
-async fn my_handler(
-    State(state): State<AppState>,
-    req: Request,
-) -> Result<String, AppError> {
-    let tenant = extract_tenant(&req);
-    
-    // Crear tarea y encolar
-    let task = Task {
-        payload: WorkPermit { tenant },
-        enqueue_ts: Instant::now(),
-        deadline: None,
-        priority: Default::default(),
-        cost: 1,
-    };
-    
-    // Encolar
-    match state.scheduler.enqueue(tenant, task) {
-        EnqueueResult::Enqueued => {}
-        EnqueueResult::Rejected(_) => return Err(AppError::TooManyRequests),
-        EnqueueResult::Closed => return Err(AppError::ServiceUnavailable),
-    }
-    
-    // Esperar nuestro turno
-    match state.scheduler.dequeue_async().await {
-        DequeueResult::Task { .. } => {
-            // Ahora podemos procesar el request
-            Ok("Processed!".to_string())
-        }
-        _ => Err(AppError::Internal)
-    }
-}
-```
+Campos:
 
-### 5. Manejo de Errores
+- `status`: codigo HTTP (u16)
+- `code`: codigo estable (`tenant_full`, `global_full`, `timeout`)
+- `message`: descripcion corta
+- `reason`: enum interno (`TenantFull`, `GlobalFull`, `Timeout`)
 
-```rust
-enum AppError {
-    TooManyRequests,      // 429
-    ServiceUnavailable,   // 503
-    Internal,             // 500
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        match self {
-            AppError::TooManyRequests => (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({"error": "Too many requests"})),
-            ).into_response(),
-            // ...
-        }
-    }
-}
-```
-
-## Ejecutar el Ejemplo
-
-```bash
-# Compilar
-cargo build --bin axum_simple
-
-# Ejecutar
-cargo run --bin axum_simple
-
-# Pruebas desde otra terminal
-curl -H "X-Tenant-ID: 1" http://127.0.0.1:3000/
-curl -H "X-Tenant-ID: 2" http://127.0.0.1:3000/api/users
-curl http://127.0.0.1:3000/api/stats  # Ver métricas
-```
-
-## Simular Carga (Hot Tenant)
-
-```bash
-# Saturar tenant 1 (verás 429s)
-for i in {1..50}; do curl -H "X-Tenant-ID: 1" http://127.0.0.1:3000/ & done
-
-# Tenant 2 sigue funcionando (fairness)
-curl -H "X-Tenant-ID: 2" http://127.0.0.1:3000/
-```
-
-## Métricas Disponibles
-
-`GET /api/stats` retorna:
+Ejemplo:
 
 ```json
 {
-  "enqueued": 150,
-  "dequeued": 140,
-  "dropped": 10,  // Requests rechazados por backpressure
-  "expired": 0,
-  "queue_len": 0,
-  "avg_queue_time_ms": 5,
-  "p95_queue_time_ms": 12,
-  "p99_queue_time_ms": 18,
-  "top_tenants": [
-    {"tenant_id": 1, "count": 80},
-    {"tenant_id": 2, "count": 60}
-  ]
+  "status": 429,
+  "code": "tenant_full",
+  "message": "tenant queue saturated",
+  "reason": "TenantFull"
 }
 ```
 
-## Configuraciones Comunes
-
-### Política Agresiva (Drop Oldest)
+## Ejemplo de configuracion en Axum
 
 ```rust
-backpressure: BackpressurePolicy::DropOldestPerTenant,
+use axum::extract::Request;
+use firq_tower::{EnqueueRejectReason, Firq, FirqHttpRejection, TenantKey};
+
+let layer = Firq::new()
+    .with_shards(4)
+    .with_max_global(1000)
+    .with_max_per_tenant(100)
+    .with_quantum(10)
+    .with_in_flight_limit(128)
+    .with_deadline_extractor::<Request, _>(|req| {
+        req.headers()
+            .get("X-Deadline-Ms")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms))
+    })
+    .with_rejection_mapper(|reason| match reason {
+        EnqueueRejectReason::TenantFull => FirqHttpRejection {
+            status: 429,
+            code: "tenant_full",
+            message: "tenant queue saturated",
+            reason,
+        },
+        EnqueueRejectReason::GlobalFull => FirqHttpRejection {
+            status: 503,
+            code: "global_full",
+            message: "service queue saturated",
+            reason,
+        },
+        EnqueueRejectReason::Timeout => FirqHttpRejection {
+            status: 503,
+            code: "timeout",
+            message: "request timed out waiting for scheduler",
+            reason,
+        },
+    })
+    .build(|req: &Request| {
+        req.headers()
+            .get("X-Tenant-ID")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(TenantKey::from)
+            .unwrap_or(TenantKey::from(0))
+    });
 ```
 
-En lugar de rechazar (429), descarta la tarea más antigua cuando el tenant está lleno.
+## Notas operativas
 
-### Quantums Diferenciados (Premium vs Free)
-
-```rust
-let mut quantum_by_tenant = HashMap::new();
-quantum_by_tenant.insert(TenantKey::from(1), 50);  // Premium: más presupuesto
-quantum_by_tenant.insert(TenantKey::from(2), 5);   // Free: menos
-
-SchedulerConfig {
-    quantum_by_tenant,
-    ..config
-}
-```
-
-### Timeout en lugar de Reject
-
-```rust
-backpressure: BackpressurePolicy::Timeout {
-    wait: Duration::from_secs(5)
-},
-```
-
-En lugar de rechazar inmediatamente, espera hasta 5 segundos por capacidad.
-
-## Notas
-
-- **`firq-tower`** existe pero está diseñado para escenarios específicos. Este enfoque manual te da más control.
-- El scheduler es **compartido** entre todos los handlers vía `State`.
-- El `dequeue_async()` **no hace polling** - usa señales internas que despiertan cuando hay trabajo.
+- `close_immediate`: deja de admitir y corta dispatch inmediatamente.
+- `close_drain`: deja de admitir y drena pendientes hasta vaciar cola.
+- Con `close_drain`, los requests ya encolados siguen pudiendo completar.
