@@ -270,7 +270,6 @@ Scenarios:
 ## Community and governance
 
 - Contribution guide: `CONTRIBUTING.md`
-- Code of conduct: `CODE_OF_CONDUCT.md`
 - Security policy: `SECURITY.md`
 - Support channels: `SUPPORT.md`
 - Release process: `RELEASING.md`
