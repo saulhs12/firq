@@ -19,5 +19,6 @@ firq-async = { path = "../firq-async", version = "0.1.0" }
 firq-tower = { path = "../firq-tower", version = "0.1.0" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net"] }
 axum = "0.7"
+actix-web = "4"
 serde_json = "1.0"
 tower = "0.4"

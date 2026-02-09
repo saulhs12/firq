@@ -53,6 +53,7 @@ cargo build --workspace
 cargo test -p firq-core
 cargo test -p firq-async
 cargo test -p firq-tower --test integration
+cargo check -p firq-examples --bins
 cargo run -p firq-examples --bin async
 ```
 
@@ -243,6 +244,10 @@ async fn guarded_handler(
 }
 ```
 
+Runnable Actix example in this repository:
+
+- `crates/firq-examples/src/bin/actix_web.rs`
+
 ## Benchmarks
 
 Run reproducible scenarios:
@@ -282,6 +287,17 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test -p firq-core
 cargo test -p firq-async
 cargo test -p firq-tower --test integration
+cargo check -p firq-examples --bins
+```
+
+Release dry-runs:
+
+```bash
+cargo publish --dry-run -p firq-core
+# after firq-core is published on crates.io:
+cargo publish --dry-run -p firq-async
+# after firq-async is published on crates.io:
+cargo publish --dry-run -p firq-tower
 ```
 
 

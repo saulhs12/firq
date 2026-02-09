@@ -22,3 +22,21 @@ jobs:
         run: cargo test -p firq-async
       - name: test-tower
         run: cargo test -p firq-tower --test integration
+      - name: check-examples
+        run: cargo check -p firq-examples --bins
+      - name: publish-dry-run-core
+        run: cargo publish --dry-run -p firq-core
+      - name: publish-dry-run-async-if-core-published
+        run: |
+          if cargo search firq-core --limit 1 | grep -q '^firq-core = '; then
+            cargo publish --dry-run -p firq-async
+          else
+            echo "Skipping firq-async dry-run until firq-core is available on crates.io"
+          fi
+      - name: publish-dry-run-tower-if-async-published
+        run: |
+          if cargo search firq-async --limit 1 | grep -q '^firq-async = '; then
+            cargo publish --dry-run -p firq-tower
+          else
+            echo "Skipping firq-tower dry-run until firq-async is available on crates.io"
+          fi

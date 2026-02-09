@@ -12,6 +12,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test -p firq-core
 cargo test -p firq-async
 cargo test -p firq-tower --test integration
+cargo check -p firq-examples --bins
 ```
 
 ## Publish order
@@ -23,6 +24,14 @@ Publish crates in dependency order:
 3. `firq-tower`
 
 `firq-examples` and `firq-bench` are marked `publish = false`.
+
+## Changelog and release notes
+
+Before publishing:
+
+1. Update `CHANGELOG.md` under `Unreleased`.
+2. Commit release changes.
+3. Create a Git tag for the release (for example `v0.1.0`).
 
 ## Dry runs
 
