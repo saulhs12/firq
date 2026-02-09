@@ -21,12 +21,36 @@ pub fn render_stats(stats: &SchedulerStats, namespace: &str) -> String {
         stats.dropped
     ));
     out.push_str(&format!(
+        "# HELP {ns}_rejected_global_total Total enqueues rejected by global capacity\n# TYPE {ns}_rejected_global_total counter\n{ns}_rejected_global_total {}\n",
+        stats.rejected_global
+    ));
+    out.push_str(&format!(
+        "# HELP {ns}_rejected_tenant_total Total enqueues rejected by tenant capacity\n# TYPE {ns}_rejected_tenant_total counter\n{ns}_rejected_tenant_total {}\n",
+        stats.rejected_tenant
+    ));
+    out.push_str(&format!(
+        "# HELP {ns}_timeout_rejected_total Total enqueues rejected due to timeout\n# TYPE {ns}_timeout_rejected_total counter\n{ns}_timeout_rejected_total {}\n",
+        stats.timeout_rejected
+    ));
+    out.push_str(&format!(
+        "# HELP {ns}_dropped_policy_total Total tasks dropped by replacement policies\n# TYPE {ns}_dropped_policy_total counter\n{ns}_dropped_policy_total {}\n",
+        stats.dropped_policy
+    ));
+    out.push_str(&format!(
         "# HELP {ns}_expired_total Total tasks expired before dequeue\n# TYPE {ns}_expired_total counter\n{ns}_expired_total {}\n",
         stats.expired
     ));
     out.push_str(&format!(
         "# HELP {ns}_queue_len_estimate Estimated queue length\n# TYPE {ns}_queue_len_estimate gauge\n{ns}_queue_len_estimate {}\n",
         stats.queue_len_estimate
+    ));
+    out.push_str(&format!(
+        "# HELP {ns}_max_global_config Configured global queue capacity\n# TYPE {ns}_max_global_config gauge\n{ns}_max_global_config {}\n",
+        stats.max_global
+    ));
+    out.push_str(&format!(
+        "# HELP {ns}_queue_saturation_ratio Queue saturation ratio (queue_len_estimate / max_global)\n# TYPE {ns}_queue_saturation_ratio gauge\n{ns}_queue_saturation_ratio {:.6}\n",
+        stats.queue_saturation_ratio
     ));
     out.push_str(&format!(
         "# HELP {ns}_queue_time_sum_ns Sum of queue time in ns\n# TYPE {ns}_queue_time_sum_ns counter\n{ns}_queue_time_sum_ns {}\n",

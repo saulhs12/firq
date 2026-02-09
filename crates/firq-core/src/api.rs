@@ -143,12 +143,48 @@ pub enum EnqueueResult {
     Closed,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TaskHandle(u64);
+
+impl TaskHandle {
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for TaskHandle {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum EnqueueWithHandleResult {
+    Enqueued(TaskHandle),
+    Rejected(EnqueueRejectReason),
+    Closed,
+}
+
 #[derive(Clone, Debug)]
 pub enum EnqueueRejectReason {
     /// Capacidad global excedida.
     GlobalFull,
     /// Capacidad por tenant excedida.
     TenantFull,
+    /// Timeout de espera por capacidad.
+    Timeout,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CloseMode {
+    Immediate,
+    Drain,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CancelResult {
+    Cancelled,
+    NotFound,
 }
 
 #[derive(Clone, Debug)]
@@ -171,8 +207,20 @@ pub struct SchedulerStats {
     pub expired: u64,
     /// Total de tareas rechazadas por backpressure (Reject).
     pub dropped: u64,
-    /// Estimación del tamaño total de cola (tareas pendientes). En v0.1 será aproximada.
+    /// Total de rechazos por capacidad global.
+    pub rejected_global: u64,
+    /// Total de rechazos por capacidad por tenant.
+    pub rejected_tenant: u64,
+    /// Total de rechazos por timeout.
+    pub timeout_rejected: u64,
+    /// Total de descartes por políticas de drop (reemplazo).
+    pub dropped_policy: u64,
+    /// Tamaño lógico total de cola (tareas pendientes), mantenido con reserva estricta.
     pub queue_len_estimate: u64,
+    /// Capacidad global configurada.
+    pub max_global: u64,
+    /// Saturación de cola: queue_len_estimate / max_global.
+    pub queue_saturation_ratio: f64,
     /// Suma acumulada del queue_time (nanosegundos) de tareas entregadas.
     /// Se usa para métricas básicas; histogramas/p99 vendrán después.
     pub queue_time_sum_ns: u64,

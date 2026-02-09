@@ -69,8 +69,14 @@ impl<T: Copy> ActiveRing<T> {
 }
 
 #[derive(Debug)]
+pub(crate) struct QueueEntry<T> {
+    pub(crate) id: u64,
+    pub(crate) task: Task<T>,
+}
+
+#[derive(Debug)]
 pub(crate) struct TenantState<T> {
-    pub(crate) queues: [VecDeque<Task<T>>; 3],
+    pub(crate) queues: [VecDeque<QueueEntry<T>>; 3],
     pub(crate) deficits: [i64; 3],
     pub(crate) quantum: i64,
     pub(crate) active: [bool; 3],
@@ -112,6 +118,10 @@ pub(crate) struct StatsCounters {
     pub(crate) dequeued: AtomicU64,
     pub(crate) expired: AtomicU64,
     pub(crate) dropped: AtomicU64,
+    pub(crate) rejected_global: AtomicU64,
+    pub(crate) rejected_tenant: AtomicU64,
+    pub(crate) timeout_rejected: AtomicU64,
+    pub(crate) dropped_policy: AtomicU64,
     pub(crate) queue_len_estimate: AtomicU64,
     pub(crate) queue_time_sum_ns: AtomicU64,
     pub(crate) queue_time_samples: AtomicU64,
@@ -125,6 +135,10 @@ impl StatsCounters {
             dequeued: AtomicU64::new(0),
             expired: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            rejected_global: AtomicU64::new(0),
+            rejected_tenant: AtomicU64::new(0),
+            timeout_rejected: AtomicU64::new(0),
+            dropped_policy: AtomicU64::new(0),
             queue_len_estimate: AtomicU64::new(0),
             queue_time_sum_ns: AtomicU64::new(0),
             queue_time_samples: AtomicU64::new(0),
@@ -206,6 +220,7 @@ impl WorkSignal {
     }
 
     pub(crate) fn notify_all(&self) {
+        let _guard = self.mutex.lock();
         self.seq.fetch_add(1, Ordering::Release);
         self.condvar.notify_all();
     }

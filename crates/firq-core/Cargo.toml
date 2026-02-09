@@ -2,6 +2,14 @@
 name = "firq-core"
 version = "0.1.0"
 edition = "2024"
+description = "Core multi-tenant scheduler with DRR fairness, deadlines, and backpressure"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/saulhs12/firq"
+documentation = "https://docs.rs/firq-core"
+homepage = "https://github.com/saulhs12/firq"
+readme = "../../README.md"
+keywords = ["scheduler", "fairness", "multi-tenant", "backpressure", "queue"]
+categories = ["concurrency", "algorithms", "asynchronous"]
 
 [dependencies]
 parking_lot = "0.12"

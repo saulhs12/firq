@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use proptest::prelude::*;
 
 use crate::{
-    BackpressurePolicy, DequeueResult, EnqueueRejectReason, EnqueueResult, Priority, Scheduler,
-    SchedulerConfig, Task, TenantKey,
+    BackpressurePolicy, CancelResult, CloseMode, DequeueResult, EnqueueRejectReason, EnqueueResult,
+    EnqueueWithHandleResult, Priority, Scheduler, SchedulerConfig, Task, TenantKey,
 };
 
 fn config(max_global: usize, max_per_tenant: usize) -> SchedulerConfig {
@@ -428,6 +428,152 @@ fn no_starvation_with_large_costs() {
         saw_heavy,
         "heavy tenant should not starve even with small quantum"
     );
+}
+
+#[test]
+fn close_drain_drains_pending_work() {
+    let scheduler = Scheduler::new(config(10, 10));
+    let tenant = TenantKey::from(7);
+
+    for payload in 0..3 {
+        let result = scheduler.enqueue(tenant, task(payload, None));
+        assert!(matches!(result, EnqueueResult::Enqueued));
+    }
+
+    scheduler.close_with_mode(CloseMode::Drain);
+    assert!(matches!(
+        scheduler.enqueue(tenant, task(99, None)),
+        EnqueueResult::Closed
+    ));
+
+    for _ in 0..3 {
+        assert!(
+            dequeue_task(&scheduler, 3).is_some(),
+            "drain mode should still deliver pending work"
+        );
+    }
+    assert!(matches!(scheduler.try_dequeue(), DequeueResult::Closed));
+}
+
+#[test]
+fn cancel_handle_releases_capacity() {
+    let scheduler = Scheduler::new(config(1, 10));
+    let tenant = TenantKey::from(1);
+
+    let handle = match scheduler.enqueue_with_handle(tenant, task(1, None)) {
+        EnqueueWithHandleResult::Enqueued(handle) => handle,
+        other => panic!("expected handle, got {:?}", other),
+    };
+
+    let second = scheduler.enqueue(tenant, task(2, None));
+    assert!(matches!(
+        second,
+        EnqueueResult::Rejected(EnqueueRejectReason::GlobalFull)
+    ));
+
+    assert!(matches!(scheduler.cancel(handle), CancelResult::Cancelled));
+
+    let third = scheduler.enqueue(tenant, task(3, None));
+    assert!(matches!(third, EnqueueResult::Enqueued));
+}
+
+#[test]
+fn global_capacity_is_strict_under_race() {
+    let scheduler = Arc::new(Scheduler::new(config(3, 100)));
+    let tenants = [TenantKey::from(1), TenantKey::from(2), TenantKey::from(3)];
+    let start = Arc::new(std::sync::Barrier::new(tenants.len()));
+    let mut threads = Vec::new();
+
+    for tenant in tenants {
+        let scheduler = Arc::clone(&scheduler);
+        let start = Arc::clone(&start);
+        threads.push(thread::spawn(move || {
+            start.wait();
+            for i in 0..5_000 {
+                let _ = scheduler.enqueue(tenant, task(i, None));
+            }
+        }));
+    }
+
+    for thread in threads {
+        thread.join().expect("producer thread should finish");
+    }
+
+    let stats = scheduler.stats();
+    assert!(
+        stats.queue_len_estimate <= 3,
+        "queue_len_estimate must not exceed max_global"
+    );
+}
+
+#[test]
+fn multi_shard_reactivation_makes_work_visible() {
+    let scheduler = Scheduler::new(SchedulerConfig {
+        shards: 4,
+        max_global: 100,
+        max_per_tenant: 100,
+        quantum: 1,
+        quantum_by_tenant: HashMap::new(),
+        quantum_provider: None,
+        backpressure: BackpressurePolicy::Reject,
+        backpressure_by_tenant: HashMap::new(),
+        top_tenants_capacity: 0,
+    });
+
+    let tenant_a = TenantKey::from(10);
+    let tenant_b = TenantKey::from(11);
+
+    assert!(matches!(
+        scheduler.enqueue(tenant_a, task(1, None)),
+        EnqueueResult::Enqueued
+    ));
+    assert!(dequeue_task(&scheduler, 3).is_some());
+    assert!(matches!(scheduler.try_dequeue(), DequeueResult::Empty));
+
+    assert!(matches!(
+        scheduler.enqueue(tenant_b, task(2, None)),
+        EnqueueResult::Enqueued
+    ));
+    assert!(
+        dequeue_task(&scheduler, 4).is_some(),
+        "work must become visible after shard reactivation"
+    );
+}
+
+#[test]
+fn high_cost_low_quantum_with_expirations_does_not_livelock() {
+    let scheduler = Scheduler::new(config(1_000, 1_000));
+    let hot = TenantKey::from(1);
+    let heavy = TenantKey::from(2);
+
+    for i in 0..200 {
+        let mut t = task(i, Some(Instant::now() - Duration::from_millis(1)));
+        t.cost = 1;
+        let _ = scheduler.enqueue(hot, t);
+    }
+
+    for i in 0..100 {
+        let mut t = task(1_000 + i, None);
+        t.cost = 1;
+        let _ = scheduler.enqueue(hot, t);
+    }
+
+    let mut heavy_task = task(9_999, None);
+    heavy_task.cost = 50;
+    let _ = scheduler.enqueue(heavy, heavy_task);
+
+    let mut saw_heavy = false;
+    for _ in 0..1_000 {
+        match scheduler.try_dequeue() {
+            DequeueResult::Task { tenant, .. } if tenant == heavy => {
+                saw_heavy = true;
+                break;
+            }
+            DequeueResult::Task { .. } | DequeueResult::Empty => {}
+            DequeueResult::Closed => break,
+        }
+    }
+    assert!(saw_heavy, "heavy task must eventually make progress");
 }
 
 proptest! {

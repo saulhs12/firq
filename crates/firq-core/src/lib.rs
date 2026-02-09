@@ -19,8 +19,9 @@ mod scheduler;
 mod state;
 
 pub use api::{
-    BackpressurePolicy, DequeueResult, EnqueueRejectReason, EnqueueResult, Priority,
-    QueueTimeBucket, SchedulerConfig, SchedulerStats, Task, TenantCount, TenantKey,
+    BackpressurePolicy, CancelResult, CloseMode, DequeueResult, EnqueueRejectReason, EnqueueResult,
+    EnqueueWithHandleResult, Priority, QueueTimeBucket, SchedulerConfig, SchedulerStats, Task,
+    TaskHandle, TenantCount, TenantKey,
 };
 pub use scheduler::Scheduler;
 

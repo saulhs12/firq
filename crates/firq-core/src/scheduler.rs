@@ -1,17 +1,22 @@
-use std::collections::HashMap;
-
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 
 use crate::api::{
-    DequeueResult, EnqueueRejectReason, EnqueueResult, QuantumProvider, SchedulerConfig,
-    SchedulerStats, Task, TenantKey,
+    CancelResult, CloseMode, DequeueResult, EnqueueRejectReason, EnqueueResult,
+    EnqueueWithHandleResult, Priority, QuantumProvider, SchedulerConfig, SchedulerStats, Task,
+    TaskHandle, TenantKey,
 };
 use crate::state::{
-    ActiveRing, QUEUE_TIME_BUCKETS_NS, Shard, StatsCounters, TenantState, TopTenants, WorkSignal,
+    ActiveRing, QUEUE_TIME_BUCKETS_NS, QueueEntry, Shard, StatsCounters, TenantState, TopTenants,
+    WorkSignal,
 };
+
+const SHUTDOWN_OPEN: u8 = 0;
+const SHUTDOWN_DRAIN: u8 = 1;
+const SHUTDOWN_IMMEDIATE: u8 = 2;
 
 pub struct Scheduler<T> {
     config: SchedulerConfig,
@@ -19,11 +24,14 @@ pub struct Scheduler<T> {
     active_shards: Mutex<ActiveRing<usize>>,
     stats: StatsCounters,
     work_signal: WorkSignal,
-    closed: AtomicBool,
+    shutdown_state: AtomicU8,
     shard_active: Vec<AtomicBool>,
     top_tenants: Mutex<TopTenants>,
     tenant_quantum: RwLock<HashMap<TenantKey, u64>>,
     quantum_provider: RwLock<Option<QuantumProvider>>,
+    next_task_id: AtomicU64,
+    pending_ids: Mutex<HashSet<u64>>,
+    cancelled_ids: Mutex<HashSet<u64>>,
 }
 
 impl<T> Scheduler<T> {
@@ -56,13 +64,27 @@ impl<T> Scheduler<T> {
         }
     }
 
-    fn activate_shard(&self, shard_index: usize) {
-        if !self.shard_active[shard_index].swap(true, Ordering::AcqRel) {
-            self.active_shards.lock().push_back(shard_index);
+    fn try_reserve_slot(&self) -> bool {
+        let max_global = self.config.max_global as u64;
+        let mut current = self.stats.queue_len_estimate.load(Ordering::Relaxed);
+        loop {
+            if current >= max_global {
+                return false;
+            }
+            let next = current + 1;
+            match self.stats.queue_len_estimate.compare_exchange(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
         }
     }
 
-    fn dec_queue_len_estimate(&self, delta: u64) {
+    fn release_reserved_slots(&self, delta: u64) {
         if delta == 0 {
             return;
         }
@@ -73,13 +95,119 @@ impl<T> Scheduler<T> {
             match self.stats.queue_len_estimate.compare_exchange(
                 current,
                 next,
-                Ordering::Relaxed,
+                Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => return,
                 Err(actual) => current = actual,
             }
         }
+    }
+
+    fn activate_shard(&self, shard_index: usize) {
+        if !self.shard_active[shard_index].swap(true, Ordering::AcqRel) {
+            self.active_shards.lock().push_back(shard_index);
+        }
+    }
+
+    fn shutdown_state(&self) -> u8 {
+        self.shutdown_state.load(Ordering::Acquire)
+    }
+
+    fn is_accepting_enqueues(&self) -> bool {
+        self.shutdown_state() == SHUTDOWN_OPEN
+    }
+
+    fn should_return_closed(&self) -> bool {
+        match self.shutdown_state() {
+            SHUTDOWN_IMMEDIATE => true,
+            SHUTDOWN_DRAIN => self.stats.queue_len_estimate.load(Ordering::Acquire) == 0,
+            _ => false,
+        }
+    }
+
+    fn set_shutdown_mode(&self, mode: CloseMode) {
+        let target = match mode {
+            CloseMode::Immediate => SHUTDOWN_IMMEDIATE,
+            CloseMode::Drain => SHUTDOWN_DRAIN,
+        };
+
+        let mut changed = false;
+        loop {
+            let current = self.shutdown_state();
+            let next = match (current, target) {
+                (SHUTDOWN_IMMEDIATE, _) => SHUTDOWN_IMMEDIATE,
+                (_, SHUTDOWN_IMMEDIATE) => SHUTDOWN_IMMEDIATE,
+                (SHUTDOWN_OPEN, SHUTDOWN_DRAIN) => SHUTDOWN_DRAIN,
+                _ => current,
+            };
+
+            if next == current {
+                break;
+            }
+
+            match self.shutdown_state.compare_exchange(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    changed = true;
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+
+        if changed {
+            self.work_signal.notify_all();
+        }
+    }
+
+    fn record_reject(&self, reason: EnqueueRejectReason) {
+        Self::saturating_add(&self.stats.dropped, 1);
+        match reason {
+            EnqueueRejectReason::GlobalFull => {
+                Self::saturating_add(&self.stats.rejected_global, 1);
+            }
+            EnqueueRejectReason::TenantFull => {
+                Self::saturating_add(&self.stats.rejected_tenant, 1);
+            }
+            EnqueueRejectReason::Timeout => {
+                Self::saturating_add(&self.stats.timeout_rejected, 1);
+            }
+        }
+    }
+
+    fn record_policy_drop(&self) {
+        Self::saturating_add(&self.stats.dropped, 1);
+        Self::saturating_add(&self.stats.dropped_policy, 1);
+    }
+
+    fn next_handle(&self) -> TaskHandle {
+        let id = self.next_task_id.fetch_add(1, Ordering::Relaxed) + 1;
+        TaskHandle::from(id)
+    }
+
+    fn register_pending(&self, handle: TaskHandle) {
+        self.pending_ids.lock().insert(handle.as_u64());
+    }
+
+    fn take_pending(&self, id: u64) -> bool {
+        self.pending_ids.lock().remove(&id)
+    }
+
+    fn mark_cancelled(&self, id: u64) {
+        self.cancelled_ids.lock().insert(id);
+    }
+
+    fn take_cancelled_marker(&self, id: u64) -> bool {
+        self.cancelled_ids.lock().remove(&id)
+    }
+
+    fn clear_cancelled_marker(&self, id: u64) {
+        self.cancelled_ids.lock().remove(&id);
     }
 
     fn quantum_for(&self, tenant: TenantKey) -> u64 {
@@ -143,29 +271,52 @@ impl<T> Scheduler<T> {
             active_shards: Mutex::new(ActiveRing::new()),
             stats: StatsCounters::new(),
             work_signal: WorkSignal::new(),
-            closed: AtomicBool::new(false),
+            shutdown_state: AtomicU8::new(SHUTDOWN_OPEN),
             shard_active,
             top_tenants: Mutex::new(TopTenants::new(top_tenants_capacity)),
+            next_task_id: AtomicU64::new(0),
+            pending_ids: Mutex::new(HashSet::new()),
+            cancelled_ids: Mutex::new(HashSet::new()),
         }
     }
 
     pub fn enqueue(&self, tenant: TenantKey, task: Task<T>) -> EnqueueResult {
+        match self.enqueue_with_handle(tenant, task) {
+            EnqueueWithHandleResult::Enqueued(_) => EnqueueResult::Enqueued,
+            EnqueueWithHandleResult::Rejected(reason) => EnqueueResult::Rejected(reason),
+            EnqueueWithHandleResult::Closed => EnqueueResult::Closed,
+        }
+    }
+
+    pub fn enqueue_with_handle(&self, tenant: TenantKey, task: Task<T>) -> EnqueueWithHandleResult {
         match self.backpressure_for(tenant).clone() {
-            crate::api::BackpressurePolicy::Reject => self.enqueue_reject(tenant, task),
+            crate::api::BackpressurePolicy::Reject => self.enqueue_reject_with_handle(tenant, task),
             crate::api::BackpressurePolicy::DropOldestPerTenant => {
-                self.enqueue_drop(tenant, task, DropStrategy::Oldest)
+                self.enqueue_drop_with_handle(tenant, task, DropStrategy::Oldest)
             }
             crate::api::BackpressurePolicy::DropNewestPerTenant => {
-                self.enqueue_drop(tenant, task, DropStrategy::Newest)
+                self.enqueue_drop_with_handle(tenant, task, DropStrategy::Newest)
             }
             crate::api::BackpressurePolicy::Timeout { wait } => {
-                self.enqueue_timeout(tenant, task, wait)
+                self.enqueue_timeout_with_handle(tenant, task, wait)
             }
         }
     }
 
+    pub fn cancel(&self, handle: TaskHandle) -> CancelResult {
+        let id = handle.as_u64();
+        if self.take_pending(id) {
+            self.mark_cancelled(id);
+            self.release_reserved_slots(1);
+            self.work_signal.notify_all();
+            CancelResult::Cancelled
+        } else {
+            CancelResult::NotFound
+        }
+    }
+
     pub fn try_dequeue(&self) -> DequeueResult<T> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.shutdown_state() == SHUTDOWN_IMMEDIATE {
             return DequeueResult::Closed;
         }
 
@@ -181,16 +332,18 @@ impl<T> Scheduler<T> {
             };
             remaining -= 1;
 
-            let mut shard = self.shards[shard_index].lock();
-            let result = self.try_dequeue_from_shard(&mut shard);
-            let shard_has_work = shard.active_rings.iter().any(|ring| !ring.is_empty());
-            drop(shard);
+            let (result, shard_has_work) = {
+                let mut shard = self.shards[shard_index].lock();
+                let result = self.try_dequeue_from_shard(&mut shard);
+                let has_work = shard.active_rings.iter().any(|ring| !ring.is_empty());
+                if !has_work {
+                    self.shard_active[shard_index].store(false, Ordering::Release);
+                }
+                (result, has_work)
+            };
 
             if shard_has_work {
-                let mut active_shards = self.active_shards.lock();
-                active_shards.push_back(shard_index);
-            } else {
-                self.shard_active[shard_index].store(false, Ordering::Release);
+                self.active_shards.lock().push_back(shard_index);
             }
 
             if let Some((tenant, task)) = result {
@@ -198,7 +351,7 @@ impl<T> Scheduler<T> {
             }
         }
 
-        if self.closed.load(Ordering::Acquire) {
+        if self.should_return_closed() {
             DequeueResult::Closed
         } else {
             DequeueResult::Empty
@@ -206,13 +359,12 @@ impl<T> Scheduler<T> {
     }
 
     fn try_dequeue_from_shard(&self, shard: &mut Shard<T>) -> Option<(TenantKey, Task<T>)> {
-        for priority in crate::api::Priority::ordered() {
+        for priority in Priority::ordered() {
             let idx = priority.index();
             if shard.active_rings[idx].is_empty() {
                 continue;
             }
 
-            // Recorremos como maximo una vuelta completa del ring para evitar loops.
             let ring_len = shard.active_rings[idx].len();
             for _ in 0..ring_len {
                 let tenant = match shard.active_rings[idx].pop_front() {
@@ -231,10 +383,17 @@ impl<T> Scheduler<T> {
                 let now = Instant::now();
 
                 while let Some(front) = queue.front() {
-                    match front.deadline {
+                    if self.take_cancelled_marker(front.id) {
+                        queue.pop_front();
+                        continue;
+                    }
+                    match front.task.deadline {
                         Some(deadline) if now > deadline => {
-                            queue.pop_front();
-                            expired_count += 1;
+                            let expired = queue.pop_front().expect("front disappeared");
+                            if self.take_pending(expired.id) {
+                                expired_count = expired_count.saturating_add(1);
+                                self.release_reserved_slots(1);
+                            }
                         }
                         _ => break,
                     }
@@ -242,7 +401,6 @@ impl<T> Scheduler<T> {
 
                 if expired_count > 0 {
                     Self::saturating_add(&self.stats.expired, expired_count);
-                    self.dec_queue_len_estimate(expired_count);
                     self.work_signal.notify_all();
                 }
 
@@ -251,7 +409,7 @@ impl<T> Scheduler<T> {
                     continue;
                 }
 
-                let front_cost = queue.front().map(|task| task.cost).unwrap_or(0);
+                let front_cost = queue.front().map(|entry| entry.task.cost).unwrap_or(0);
                 let cost = if front_cost > i64::MAX as u64 {
                     i64::MAX
                 } else {
@@ -264,9 +422,8 @@ impl<T> Scheduler<T> {
                     continue;
                 }
 
-                *deficit -= cost;
-                let task = match queue.pop_front() {
-                    Some(task) => task,
+                let entry = match queue.pop_front() {
+                    Some(entry) => entry,
                     None => {
                         tenant_state.active[idx] = false;
                         continue;
@@ -279,12 +436,22 @@ impl<T> Scheduler<T> {
                     shard.active_rings[idx].push_back(tenant);
                 }
 
+                if self.take_cancelled_marker(entry.id) {
+                    continue;
+                }
+
+                if !self.take_pending(entry.id) {
+                    continue;
+                }
+
+                *deficit -= cost;
+
                 Self::saturating_add(&self.stats.dequeued, 1);
-                self.dec_queue_len_estimate(1);
+                self.release_reserved_slots(1);
                 self.work_signal.notify_all();
 
-                let queue_time_ns = now
-                    .duration_since(task.enqueue_ts)
+                let queue_time_ns = Instant::now()
+                    .duration_since(entry.task.enqueue_ts)
                     .as_nanos()
                     .min(u128::from(u64::MAX)) as u64;
                 Self::saturating_add(&self.stats.queue_time_sum_ns, queue_time_ns);
@@ -292,7 +459,7 @@ impl<T> Scheduler<T> {
                 self.record_queue_time(queue_time_ns);
                 self.top_tenants.lock().record(tenant, 1);
 
-                return Some((tenant, task));
+                return Some((tenant, entry.task));
             }
         }
 
@@ -302,6 +469,7 @@ impl<T> Scheduler<T> {
     pub fn dequeue_blocking(&self) -> DequeueResult<T> {
         const BACKOFF_SPINS: u32 = 64;
         const BACKOFF_SLEEP: Duration = Duration::from_micros(200);
+
         let mut spins = 0u32;
         loop {
             let observed = self.work_signal.current();
@@ -311,12 +479,11 @@ impl<T> Scheduler<T> {
                 }
                 DequeueResult::Closed => return DequeueResult::Closed,
                 DequeueResult::Empty => {
-                    if self.closed.load(Ordering::Acquire) {
+                    if self.should_return_closed() {
                         return DequeueResult::Closed;
                     }
 
-                    if self.stats.queue_len_estimate.load(Ordering::Relaxed) > 0 {
-                        // Hay trabajo pendiente pero aun no elegible (e.g. DRR); reintentar.
+                    if self.stats.queue_len_estimate.load(Ordering::Acquire) > 0 {
                         spins = spins.saturating_add(1);
                         if spins >= BACKOFF_SPINS {
                             let _ = self
@@ -365,6 +532,14 @@ impl<T> Scheduler<T> {
                 .unwrap_or(0)
         };
 
+        let queue_len_estimate = self.stats.queue_len_estimate.load(Ordering::Relaxed);
+        let max_global = self.config.max_global as u64;
+        let queue_saturation_ratio = if max_global == 0 {
+            0.0
+        } else {
+            queue_len_estimate as f64 / max_global as f64
+        };
+
         let top_tenants = self.top_tenants.lock().snapshot();
 
         SchedulerStats {
@@ -372,7 +547,13 @@ impl<T> Scheduler<T> {
             dequeued: self.stats.dequeued.load(Ordering::Relaxed),
             expired: self.stats.expired.load(Ordering::Relaxed),
             dropped: self.stats.dropped.load(Ordering::Relaxed),
-            queue_len_estimate: self.stats.queue_len_estimate.load(Ordering::Relaxed),
+            rejected_global: self.stats.rejected_global.load(Ordering::Relaxed),
+            rejected_tenant: self.stats.rejected_tenant.load(Ordering::Relaxed),
+            timeout_rejected: self.stats.timeout_rejected.load(Ordering::Relaxed),
+            dropped_policy: self.stats.dropped_policy.load(Ordering::Relaxed),
+            queue_len_estimate,
+            max_global,
+            queue_saturation_ratio,
             queue_time_sum_ns: self.stats.queue_time_sum_ns.load(Ordering::Relaxed),
             queue_time_samples: self.stats.queue_time_samples.load(Ordering::Relaxed),
             queue_time_p95_ns: percentile(0.95),
@@ -383,10 +564,19 @@ impl<T> Scheduler<T> {
     }
 
     pub fn close(&self) {
-        let was_closed = self.closed.swap(true, Ordering::Release);
-        if !was_closed {
-            self.work_signal.notify_all();
-        }
+        self.close_immediate();
+    }
+
+    pub fn close_immediate(&self) {
+        self.set_shutdown_mode(CloseMode::Immediate);
+    }
+
+    pub fn close_drain(&self) {
+        self.set_shutdown_mode(CloseMode::Drain);
+    }
+
+    pub fn close_with_mode(&self, mode: CloseMode) {
+        self.set_shutdown_mode(mode);
     }
 }
 
@@ -396,43 +586,50 @@ enum DropStrategy {
 }
 
 enum EnqueueAttempt<T> {
-    Enqueued,
+    Enqueued(TaskHandle),
     Closed,
     Full(Task<T>, EnqueueRejectReason),
 }
 
 impl<T> Scheduler<T> {
-    fn enqueue_reject(&self, tenant: TenantKey, task: Task<T>) -> EnqueueResult {
+    fn enqueue_reject_with_handle(
+        &self,
+        tenant: TenantKey,
+        task: Task<T>,
+    ) -> EnqueueWithHandleResult {
         match self.enqueue_try_reject(tenant, task) {
-            EnqueueAttempt::Enqueued => EnqueueResult::Enqueued,
-            EnqueueAttempt::Closed => EnqueueResult::Closed,
+            EnqueueAttempt::Enqueued(handle) => EnqueueWithHandleResult::Enqueued(handle),
+            EnqueueAttempt::Closed => EnqueueWithHandleResult::Closed,
             EnqueueAttempt::Full(_, reason) => {
-                Self::saturating_add(&self.stats.dropped, 1);
-                EnqueueResult::Rejected(reason)
+                self.record_reject(reason.clone());
+                EnqueueWithHandleResult::Rejected(reason)
             }
         }
     }
 
-    fn enqueue_timeout(
+    fn enqueue_timeout_with_handle(
         &self,
         tenant: TenantKey,
         mut task: Task<T>,
-        wait: std::time::Duration,
-    ) -> EnqueueResult {
+        wait: Duration,
+    ) -> EnqueueWithHandleResult {
         let deadline = Instant::now() + wait;
         loop {
-            if self.closed.load(Ordering::Acquire) {
-                return EnqueueResult::Closed;
+            if !self.is_accepting_enqueues() {
+                return EnqueueWithHandleResult::Closed;
             }
+
             let observed = self.work_signal.current();
             match self.enqueue_try_reject(tenant, task) {
-                EnqueueAttempt::Enqueued => return EnqueueResult::Enqueued,
-                EnqueueAttempt::Closed => return EnqueueResult::Closed,
-                EnqueueAttempt::Full(returned, reason) => {
+                EnqueueAttempt::Enqueued(handle) => {
+                    return EnqueueWithHandleResult::Enqueued(handle);
+                }
+                EnqueueAttempt::Closed => return EnqueueWithHandleResult::Closed,
+                EnqueueAttempt::Full(returned, _) => {
                     task = returned;
                     if Instant::now() >= deadline {
-                        Self::saturating_add(&self.stats.dropped, 1);
-                        return EnqueueResult::Rejected(reason);
+                        self.record_reject(EnqueueRejectReason::Timeout);
+                        return EnqueueWithHandleResult::Rejected(EnqueueRejectReason::Timeout);
                     }
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     let _ = self
@@ -444,20 +641,14 @@ impl<T> Scheduler<T> {
     }
 
     fn enqueue_try_reject(&self, tenant: TenantKey, task: Task<T>) -> EnqueueAttempt<T> {
-        if self.closed.load(Ordering::Acquire) {
+        if !self.is_accepting_enqueues() {
             return EnqueueAttempt::Closed;
-        }
-
-        let max_global = self.config.max_global as u64;
-        let current_len = self.stats.queue_len_estimate.load(Ordering::Relaxed);
-        if current_len >= max_global {
-            return EnqueueAttempt::Full(task, EnqueueRejectReason::GlobalFull);
         }
 
         let shard_index = self.shard_index(tenant);
         let mut shard = self.shards[shard_index].lock();
 
-        if self.closed.load(Ordering::Acquire) {
+        if !self.is_accepting_enqueues() {
             return EnqueueAttempt::Closed;
         }
 
@@ -472,10 +663,20 @@ impl<T> Scheduler<T> {
             return EnqueueAttempt::Full(task, EnqueueRejectReason::TenantFull);
         }
 
+        if !self.try_reserve_slot() {
+            return EnqueueAttempt::Full(task, EnqueueRejectReason::GlobalFull);
+        }
+
+        let handle = self.next_handle();
+        self.register_pending(handle);
+
         let priority_index = task.priority.index();
         let queue = &mut tenant_state.queues[priority_index];
         let was_empty = queue.is_empty();
-        queue.push_back(task);
+        queue.push_back(QueueEntry {
+            id: handle.as_u64(),
+            task,
+        });
 
         if was_empty && !tenant_state.active[priority_index] {
             tenant_state.active[priority_index] = true;
@@ -483,7 +684,6 @@ impl<T> Scheduler<T> {
         }
 
         Self::saturating_add(&self.stats.enqueued, 1);
-        Self::saturating_add(&self.stats.queue_len_estimate, 1);
 
         drop(shard);
 
@@ -495,24 +695,24 @@ impl<T> Scheduler<T> {
             self.work_signal.notify_all();
         }
 
-        EnqueueAttempt::Enqueued
+        EnqueueAttempt::Enqueued(handle)
     }
 
-    fn enqueue_drop(
+    fn enqueue_drop_with_handle(
         &self,
         tenant: TenantKey,
         task: Task<T>,
         strategy: DropStrategy,
-    ) -> EnqueueResult {
-        if self.closed.load(Ordering::Acquire) {
-            return EnqueueResult::Closed;
+    ) -> EnqueueWithHandleResult {
+        if !self.is_accepting_enqueues() {
+            return EnqueueWithHandleResult::Closed;
         }
 
         let shard_index = self.shard_index(tenant);
         let mut shard = self.shards[shard_index].lock();
 
-        if self.closed.load(Ordering::Acquire) {
-            return EnqueueResult::Closed;
+        if !self.is_accepting_enqueues() {
+            return EnqueueWithHandleResult::Closed;
         }
 
         let shard_was_empty = shard.active_rings.iter().all(|ring| ring.is_empty());
@@ -522,30 +722,45 @@ impl<T> Scheduler<T> {
             .entry(tenant)
             .or_insert_with(|| TenantState::new(self.quantum_for(tenant) as i64));
 
-        let max_global = self.config.max_global as u64;
-        let current_len = self.stats.queue_len_estimate.load(Ordering::Relaxed);
-        let global_full = current_len >= max_global;
+        let current_len = self.stats.queue_len_estimate.load(Ordering::Acquire);
         let tenant_full = tenant_state.total_len() >= self.config.max_per_tenant;
+        let global_full = current_len >= self.config.max_global as u64;
 
-        if global_full || tenant_full {
+        let mut reused_slot = false;
+        if tenant_full || global_full {
             let dropped = self.drop_from_tenant(tenant_state, strategy, task.priority);
-            if let Some(_dropped) = dropped {
-                Self::saturating_add(&self.stats.dropped, 1);
-                self.dec_queue_len_estimate(1);
-            } else {
-                Self::saturating_add(&self.stats.dropped, 1);
-                return EnqueueResult::Rejected(if global_full {
-                    EnqueueRejectReason::GlobalFull
-                } else {
+            let Some(dropped) = dropped else {
+                let reason = if tenant_full {
                     EnqueueRejectReason::TenantFull
-                });
+                } else {
+                    EnqueueRejectReason::GlobalFull
+                };
+                self.record_reject(reason.clone());
+                return EnqueueWithHandleResult::Rejected(reason);
+            };
+
+            self.clear_cancelled_marker(dropped.id);
+            if self.take_pending(dropped.id) {
+                self.record_policy_drop();
+                reused_slot = true;
             }
         }
+
+        if !reused_slot && !self.try_reserve_slot() {
+            self.record_reject(EnqueueRejectReason::GlobalFull);
+            return EnqueueWithHandleResult::Rejected(EnqueueRejectReason::GlobalFull);
+        }
+
+        let handle = self.next_handle();
+        self.register_pending(handle);
 
         let priority_index = task.priority.index();
         let queue = &mut tenant_state.queues[priority_index];
         let was_empty = queue.is_empty();
-        queue.push_back(task);
+        queue.push_back(QueueEntry {
+            id: handle.as_u64(),
+            task,
+        });
 
         if was_empty && !tenant_state.active[priority_index] {
             tenant_state.active[priority_index] = true;
@@ -553,7 +768,6 @@ impl<T> Scheduler<T> {
         }
 
         Self::saturating_add(&self.stats.enqueued, 1);
-        Self::saturating_add(&self.stats.queue_len_estimate, 1);
 
         drop(shard);
 
@@ -565,28 +779,23 @@ impl<T> Scheduler<T> {
             self.work_signal.notify_all();
         }
 
-        EnqueueResult::Enqueued
+        EnqueueWithHandleResult::Enqueued(handle)
     }
 
     fn drop_from_tenant(
         &self,
         tenant_state: &mut TenantState<T>,
         strategy: DropStrategy,
-        incoming: crate::api::Priority,
-    ) -> Option<Task<T>> {
-        const DROP_HIGH: [crate::api::Priority; 3] = [
-            crate::api::Priority::Low,
-            crate::api::Priority::Normal,
-            crate::api::Priority::High,
-        ];
-        const DROP_NORMAL: [crate::api::Priority; 2] =
-            [crate::api::Priority::Low, crate::api::Priority::Normal];
-        const DROP_LOW: [crate::api::Priority; 1] = [crate::api::Priority::Low];
+        incoming: Priority,
+    ) -> Option<QueueEntry<T>> {
+        const DROP_HIGH: [Priority; 3] = [Priority::Low, Priority::Normal, Priority::High];
+        const DROP_NORMAL: [Priority; 2] = [Priority::Low, Priority::Normal];
+        const DROP_LOW: [Priority; 1] = [Priority::Low];
 
-        let drop_order: &[crate::api::Priority] = match incoming {
-            crate::api::Priority::High => &DROP_HIGH,
-            crate::api::Priority::Normal => &DROP_NORMAL,
-            crate::api::Priority::Low => &DROP_LOW,
+        let drop_order: &[Priority] = match incoming {
+            Priority::High => &DROP_HIGH,
+            Priority::Normal => &DROP_NORMAL,
+            Priority::Low => &DROP_LOW,
         };
 
         for &priority in drop_order {
