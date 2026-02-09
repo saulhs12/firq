@@ -274,6 +274,7 @@ El core expone un mecanismo para:
 - `queue_time`:
   - al entregar una tarea: `now - enqueue_ts`.
   - v0.1: acumulación básica (sum + samples). Luego histogramas/p95/p99.
+ - Semantica exacta: ver `docs/metrics.md`.
 
 ---
 
@@ -303,6 +304,16 @@ El core expone un mecanismo para:
 3) Un tenant activo con trabajo progresa (no starvation).
 4) `queue_len_estimate` consistente (no negativo; se ajusta con enqueue/dequeue/expired).
 5) Al `close()`, consumidores bloqueados se despiertan y retornan `Closed`.
+
+---
+
+## Estabilidad de API (post v0.1)
+
+- Objetivo: minimizar cambios breaking despues de v0.1.
+- Cambios preferidos: aditivos (nuevas funciones/metricas/campos opcionales).
+- Cambios breaking: solo en bump mayor y con notas de migracion claras.
+- Deprecaciones: primero se marca como deprecated, luego se remueve en version mayor.
+- Metricas: se agregan sin renombrar ni eliminar las existentes.
 
 ---
 

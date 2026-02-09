@@ -77,7 +77,7 @@ Objetivo: una librería funcional, testeada, con ejemplos y microbench básicos.
   - [x] `deficit += quantum` cuando no alcanza para el `cost` del frente.
   - [x] Entregar tarea cuando `deficit >= cost` y descontar.
   - [x] Reinsertar tenant al final del ring si sigue con cola.
-- [ ] Garantizar no-starvation (mediante tests).
+- [x] Garantizar no-starvation (mediante tests).
 
 ### 1.4 Deadlines: DropExpired (core)
 - [x] En `try_dequeue`:
@@ -173,47 +173,47 @@ Explícitamente fuera de alcance en v0.1:
   - [x] imports solo desde `firq-async` (sin `firq-core`).
 
 ### 1.11 Bench (`firq-bench`)
-- [ ] Escenario “hot tenant vs many tenants”:
-  - [ ] medir throughput
-  - [ ] medir queue_time promedio (sum/samples)
-  - [ ] registrar drops/expired
+- [x] Escenario “hot tenant vs many tenants”:
+  - [x] medir throughput
+  - [x] medir queue_time promedio (sum/samples)
+  - [x] registrar drops/expired
 
 ### 1.12 Calidad y DX
-- [ ] `cargo fmt`.
-- [ ] `cargo clippy -D warnings`.
-- [ ] CI mínimo (fmt, clippy, test).
+- [x] `cargo fmt`.
+- [x] `cargo clippy -D warnings`.
+- [x] CI mínimo (fmt, clippy, test).
 
 ---
 
 ## 2) Post-MVP (v0.2+): features y mejoras
 
 ### 2.1 Backpressure avanzado
-- [ ] `DropOldestPerTenant`.
-- [ ] `DropNewestPerTenant`.
-- [ ] `Timeout` (espera por capacidad con límite de tiempo).
-- [ ] Políticas por tenant/plan (ej: premium vs free).
+- [x] `DropOldestPerTenant`.
+- [x] `DropNewestPerTenant`.
+- [x] `Timeout` (espera por capacidad con límite de tiempo).
+- [x] Políticas por tenant/plan (ej: premium vs free).
 
 ### 2.2 Pesos por tenant (QoS)
-- [ ] `quantum` por tenant:
-  - [ ] configurado por tabla/closure.
-  - [ ] update dinámico (hot reload).
+- [x] `quantum` por tenant:
+  - [x] configurado por tabla/closure.
+  - [x] update dinámico (hot reload).
 
 ### 2.3 Priorización
-- [ ] Prioridades discretas (High/Normal/Low).
-- [ ] Fairness dentro de prioridad.
-- [ ] Shed de baja prioridad bajo presión.
+- [x] Prioridades discretas (High/Normal/Low).
+- [x] Fairness dentro de prioridad.
+- [x] Shed de baja prioridad bajo presión.
 
 ### 2.4 Métricas avanzadas
-- [ ] Histogramas de queue_time.
-- [ ] Percentiles p95/p99.
-- [ ] Métricas por tenant (top talkers) con estructura acotada.
-- [ ] Export Prometheus (posible en crate separado).
+- [x] Histogramas de queue_time.
+- [x] Percentiles p95/p99.
+- [x] Métricas por tenant (top talkers) con estructura acotada.
+- [x] Export Prometheus (posible en crate separado).
 
 ### 2.5 Optimizaciones de performance
-- [ ] Evitar barrer shards en `try_dequeue` (cursor global o estrategia de selección).
-- [ ] Reducción de locks (parking_lot vs std; granularidad).
-- [ ] Mejoras en estructuras (ring más eficiente, reuso de allocations).
-- [ ] Benchmarks comparativos (baseline FIFO vs Firq).
+- [x] Evitar barrer shards en `try_dequeue` (cursor global o estrategia de selección).
+- [x] Reducción de locks (parking_lot vs std; granularidad).
+- [x] Mejoras en estructuras (ring más eficiente, reuso de allocations).
+- [x] Benchmarks comparativos (baseline FIFO vs Firq).
 
 ### 2.6 `firq-tower` (integración Tower / HTTP – post‑MVP)
 
@@ -245,18 +245,18 @@ Explícitamente fuera de alcance:
 ## 3) Fixes / hardening típicos (a rastrear desde el inicio)
 
 ### Correctness
-- [ ] Evitar starvation en casos borde (costs grandes + quantum pequeño).
-- [ ] Manejo correcto de overflow en contadores.
-- [ ] Cierre (`close`) seguro: no deadlocks, despertar a todos.
-- [ ] Evitar livelock bajo presión.
+- [x] Evitar starvation en casos borde (costs grandes + quantum pequeño).
+- [x] Manejo correcto de overflow en contadores.
+- [x] Cierre (`close`) seguro: no deadlocks, despertar a todos.
+- [x] Evitar livelock bajo presión.
 
 ### Concurrency
-- [ ] Revisar `Ordering` de atomics (Relaxed vs Acquire/Release donde aplique).
-- [ ] Confirmar que la señalización no pierde wakeups.
+- [x] Revisar `Ordering` de atomics (Relaxed vs Acquire/Release donde aplique).
+- [x] Confirmar que la señalización no pierde wakeups.
 
 ### API stability
-- [ ] Minimizar breaking changes tras v0.1.
-- [ ] Documentar semántica exacta de cada métrica.
+- [x] Minimizar breaking changes tras v0.1.
+- [x] Documentar semántica exacta de cada métrica.
 
 ---
 
