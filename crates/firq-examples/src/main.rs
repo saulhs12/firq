@@ -7,7 +7,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use firq_core::{
-    BackpressurePolicy, DequeueResult, EnqueueResult, Scheduler, SchedulerConfig, Task, TenantKey,
+    BackpressurePolicy, DequeueResult, EnqueueResult, Priority, Scheduler, SchedulerConfig, Task,
+    TenantKey,
 };
 
 // Core-only example: heavy data pipeline with 30 tenants and 4 workers.
@@ -93,7 +94,11 @@ fn example_config() -> ExampleConfig {
             max_global: 60_000,
             max_per_tenant: 2_000,
             quantum: 5,
+            quantum_by_tenant: HashMap::new(),
+            quantum_provider: None,
             backpressure: BackpressurePolicy::Reject,
+            backpressure_by_tenant: HashMap::new(),
+            top_tenants_capacity: 64,
         },
     }
 }
@@ -197,6 +202,7 @@ fn spawn_producers(state: Arc<ExampleState>) -> Vec<thread::JoinHandle<()>> {
                     payload: job,
                     enqueue_ts: Instant::now(),
                     deadline: None,
+                    priority: Priority::Normal,
                     cost: job_cost(plan.base_cost, bytes_kb),
                 };
                 produced_total.fetch_add(1, Ordering::Relaxed);

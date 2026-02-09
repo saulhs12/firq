@@ -6,8 +6,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use firq_async::{
-    AsyncScheduler, BackpressurePolicy, DequeueItem, Dispatcher, EnqueueResult, Scheduler,
-    SchedulerConfig, Task, TenantKey,
+    AsyncScheduler, BackpressurePolicy, DequeueItem, Dispatcher, EnqueueResult, Priority,
+    Scheduler, SchedulerConfig, Task, TenantKey,
 };
 
 #[derive(Clone, Debug)]
@@ -33,7 +33,11 @@ async fn main() {
         max_global: 10_000,
         max_per_tenant: 5_000,
         quantum: 2,
+        quantum_by_tenant: HashMap::new(),
+        quantum_provider: None,
         backpressure: BackpressurePolicy::Reject,
+        backpressure_by_tenant: HashMap::new(),
+        top_tenants_capacity: 64,
     }));
     let async_scheduler = AsyncScheduler::new(Arc::clone(&scheduler));
 
@@ -79,6 +83,7 @@ async fn main() {
                     payload: seq,
                     enqueue_ts: Instant::now(),
                     deadline: None,
+                    priority: Priority::Normal,
                     cost: tenant.cost,
                 };
                 produced[idx].fetch_add(1, Ordering::Relaxed);
