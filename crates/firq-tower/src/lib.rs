@@ -1,4 +1,10 @@
-use firq_async::{AsyncScheduler, EnqueueResult, EnqueueRejectReason, Task, TenantKey};
+mod builder;
+pub use builder::Firq;
+pub use firq_async::{
+    self, AsyncScheduler, BackpressurePolicy, DequeueResult, EnqueueRejectReason, EnqueueResult,
+    Priority, QueueTimeBucket, Scheduler, SchedulerConfig, SchedulerStats, Task, TenantCount,
+    TenantKey,
+};
 
 use pin_project_lite::pin_project;
 use std::fmt;
@@ -108,7 +114,20 @@ impl<Request, K> FirqLayer<Request, K> {
             _marker: PhantomData,
         }
     }
+
+    /// Retorna una referencia al scheduler subyacente.
+    pub fn scheduler(&self) -> &AsyncScheduler<FirqPermit> {
+        &self.scheduler
+    }
 }
+
+impl<Request> FirqLayer<Request, ()> {
+    /// Crea un nuevo builder `Firq` para configurar la capa.
+    pub fn builder() -> Firq {
+        Firq::new()
+    }
+}
+
 
 impl<S, Request, K> tower::Layer<S> for FirqLayer<Request, K>
 where
@@ -127,12 +146,26 @@ where
 }
 
 /// Service middleware que encola requests en Firq.
-#[derive(Clone)]
 pub struct FirqService<S, K, Request> {
     inner: S,
     scheduler: AsyncScheduler<FirqPermit>,
     extractor: K,
     _marker: PhantomData<Request>,
+}
+
+impl<S, K, Request> Clone for FirqService<S, K, Request>
+where
+    S: Clone,
+    K: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            scheduler: self.scheduler.clone(),
+            extractor: self.extractor.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<S, K, Request> Service<Request> for FirqService<S, K, Request>

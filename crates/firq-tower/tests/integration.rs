@@ -1,6 +1,6 @@
-use firq_async::{AsyncScheduler, Scheduler, SchedulerConfig, TenantKey};
-use firq_tower::FirqLayer;
+use firq_tower::{Firq, TenantKey};
 use tower::{Service, ServiceBuilder};
+use std::task::Poll;
 
 #[derive(Clone)]
 struct MockService;
@@ -21,37 +21,30 @@ impl Service<String> for MockService {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_firq_tower_integration() {
-    // 1. Configurar Scheduler con FirqPermit
-    let config = SchedulerConfig {
-        shards: 1,
-        max_global: 10,
-        max_per_tenant: 5,
-        quantum: 10,
-        quantum_by_tenant: Default::default(),
-        quantum_provider: None,
-        backpressure: firq_async::BackpressurePolicy::Reject,
-        backpressure_by_tenant: Default::default(),
-        top_tenants_capacity: 10,
-    };
-    let scheduler = AsyncScheduler::new(std::sync::Arc::new(Scheduler::new(config)));
+    // 1. Configurar Scheduler con Builder Pattern (Mucho más limpio)
+    let layer = Firq::new()
+        .with_shards(1)
+        .with_max_global(10)
+        .with_max_per_tenant(5)
+        .with_quantum(10)
+        .build(|req: &String| TenantKey::from(req.len() as u64));
+    let scheduler = layer.scheduler().clone();
 
     // 2. Crear Service con Layer
-    let extractor = |req: &String| TenantKey::from(req.len() as u64);
-    
-    // FirqLayer ahora spawnea el background worker automáticamente.
-    let layer = FirqLayer::new(scheduler, extractor);
     let mut service = ServiceBuilder::new()
         .layer(layer)
         .service(MockService);
 
     // 3. Enviar un request
     let req = "test".to_string();
-    // poll_ready required by Tower (aunque aqui MockService siempre esta ready)
-    std::future::poll_fn(|cx| service.poll_ready(cx)).await.unwrap();
+    // poll_ready required by Tower
+    std::future::poll_fn(|cx| -> Poll<Result<(), std::io::Error>> { service.poll_ready(cx).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)) }).await.unwrap();
     
-    let result = service.call(req).await;
+    let result: Result<String, _> = service.call(req).await;
     
     // 4. Verificar resultado
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), "Processed: test");
+
+    scheduler.close();
 }

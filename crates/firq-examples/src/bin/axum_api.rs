@@ -1,55 +1,47 @@
 use axum::{
+    error_handling::HandleErrorLayer,
     extract::Request,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
-use firq_async::{AsyncScheduler, Scheduler, SchedulerConfig, TenantKey};
-use firq_tower::FirqLayer;
+use firq_tower::{AsyncScheduler, Firq, FirqPermit, TenantKey};
 use serde_json::json;
-use std::sync::Arc;
+use tower::ServiceBuilder;
 
 #[tokio::main]
 async fn main() {
-    // 1. Configurar el Scheduler de Firq
-    let config = SchedulerConfig {
-        shards: 4,                    // 4 shards para reducir contención
-        max_global: 1000,             // Máximo 1000 requests en cola
-        max_per_tenant: 100,          // Máximo 100 requests por tenant
-        quantum: 10,                  // Presupuesto base para DRR
-        quantum_by_tenant: Default::default(),
-        quantum_provider: None,
-        backpressure: firq_async::BackpressurePolicy::Reject, // Rechazar cuando esté lleno
-        backpressure_by_tenant: Default::default(),
-        top_tenants_capacity: 20,     // Trackear top 20 tenants
-    };
+    // 1. Configurar Firq usando el Builder (Limpio y simple)
+    // El tipo `Request` se infiere del extractor automáticamente.
+    let firq_layer = Firq::new()
+        .with_shards(4)
+        .with_max_global(1000)
+        .with_max_per_tenant(100)
+        .with_quantum(10)
+        .build(|req: &Request| {
+            req.headers()
+                .get("X-Tenant-ID")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(TenantKey::from)
+                .unwrap_or(TenantKey::from(0))
+        });
 
-    let scheduler = AsyncScheduler::new(Arc::new(Scheduler::new(config)));
-
-    // 2. Definir cómo extraer el TenantKey de los requests
-    // En este ejemplo, usamos el header "X-Tenant-ID"
-    let tenant_extractor = |req: &Request| {
-        req.headers()
-            .get("X-Tenant-ID")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(TenantKey::from)
-            .unwrap_or_else(|| {
-                // Si no hay tenant ID, usar IP o valor default
-                TenantKey::from(0)
-            })
-    };
-
-    // 3. Crear el FirqLayer (esto automáticamente inicia el background worker)
-    let firq_layer = FirqLayer::new(scheduler.clone(), tenant_extractor);
+    // 2. Obtener referencia al scheduler para métricas (opcional)
+    let scheduler = firq_layer.scheduler().clone();
 
     // 4. Crear la aplicación Axum
     let app = Router::new()
         .route("/", get(root_handler))
         .route("/api/users", get(list_users))
         .route("/api/status", get(status_handler))
-        .layer(firq_layer)  // ← Aplicar Firq como middleware
+        .layer(
+            ServiceBuilder::new()
+                // Axum expects fallible layers to be converted into HTTP responses.
+                .layer(HandleErrorLayer::new(handle_firq_error))
+                .layer(firq_layer),
+        )
         .with_state(AppState { scheduler });
 
     // 5. Iniciar el servidor
@@ -66,7 +58,7 @@ async fn main() {
 // Estado compartido de la aplicación
 #[derive(Clone)]
 struct AppState {
-    scheduler: AsyncScheduler<firq_tower::FirqPermit>,
+    scheduler: AsyncScheduler<FirqPermit>,
 }
 
 // Handlers de ejemplo
@@ -129,4 +121,10 @@ impl From<firq_tower::FirqError<std::convert::Infallible>> for AppError {
             firq_tower::FirqError::Service(e) => match e {},
         }
     }
+}
+
+async fn handle_firq_error(
+    err: firq_tower::FirqError<std::convert::Infallible>,
+) -> impl IntoResponse {
+    AppError::from(err)
 }

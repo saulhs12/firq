@@ -108,6 +108,22 @@ impl fmt::Debug for SchedulerConfig {
     }
 }
 
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            shards: 1,
+            max_global: 1000,
+            max_per_tenant: 100,
+            quantum: 10,
+            quantum_by_tenant: HashMap::new(),
+            quantum_provider: None,
+            backpressure: BackpressurePolicy::Reject,
+            backpressure_by_tenant: HashMap::new(),
+            top_tenants_capacity: 10,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum BackpressurePolicy {
     /// Rechaza el enqueue cuando se excede `max_global` o `max_per_tenant`.

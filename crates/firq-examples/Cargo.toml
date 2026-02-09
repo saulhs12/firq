@@ -10,4 +10,4 @@ firq-tower = { path = "../firq-tower" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net"] }
 axum = "0.7"
 serde_json = "1.0"
-
+tower = "0.4"
