@@ -66,6 +66,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          CRATES_IO_API="https://crates.io/api/v1/crates"
+          USER_AGENT="firq-publish-ci (https://github.com/saulhs12/firq)"
+
           local_version() {
             local crate="$1"
             cargo metadata --no-deps --format-version 1 \
@@ -74,8 +77,13 @@ jobs:
 
           remote_version() {
             local crate="$1"
-            curl -fsSL "https://crates.io/api/v1/crates/${crate}" \
-              | jq -r '.crate.max_version // empty' || true
+            local body
+            body="$(curl -sSL -H "User-Agent: ${USER_AGENT}" "${CRATES_IO_API}/${crate}" || true)"
+            if [ -z "$body" ]; then
+              echo ""
+              return 0
+            fi
+            echo "$body" | jq -r '.crate.max_version // empty' 2>/dev/null || true
           }
 
           publish_once() {
@@ -89,7 +97,7 @@ jobs:
             if [ $status -eq 0 ]; then
               return 0
             fi
-            if echo "$output" | grep -qi "already uploaded"; then
+            if echo "$output" | grep -Eqi "already uploaded|already exists on crates\.io index"; then
               echo "crate ${crate} already uploaded; continuing"
               return 0
             fi
@@ -116,6 +124,7 @@ jobs:
           for crate in firq-core firq-async firq-tower; do
             local_ver="$(local_version "$crate")"
             remote_ver="$(remote_version "$crate")"
+            echo "${crate}: local=${local_ver} remote=${remote_ver:-<unknown>}"
             if [ -n "$remote_ver" ] && [ "$remote_ver" = "$local_ver" ]; then
               echo "${crate} ${local_ver} already on crates.io; skipping"
               continue
