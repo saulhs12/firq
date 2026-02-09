@@ -1,0 +1,63 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  github-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: ensure-jq
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+      - name: build-release-notes
+        run: |
+          set -euo pipefail
+
+          crate_version() {
+            local crate="$1"
+            cargo metadata --no-deps --format-version 1 \
+              | jq -r --arg crate "$crate" '.packages[] | select(.name == $crate) | .version'
+          }
+
+          CORE_VERSION="$(crate_version firq-core)"
+          ASYNC_VERSION="$(crate_version firq-async)"
+          TOWER_VERSION="$(crate_version firq-tower)"
+
+          {
+            echo "# Firq ${GITHUB_REF_NAME}"
+            echo
+            echo "This GitHub release is linked to crates.io packages."
+            echo
+            echo "## Crates"
+            echo
+            echo "- **firq-core** v${CORE_VERSION}"
+            echo "  - crates.io: https://crates.io/crates/firq-core"
+            echo "  - docs.rs: https://docs.rs/firq-core/${CORE_VERSION}"
+            echo
+            echo "- **firq-async** v${ASYNC_VERSION}"
+            echo "  - crates.io: https://crates.io/crates/firq-async"
+            echo "  - docs.rs: https://docs.rs/firq-async/${ASYNC_VERSION}"
+            echo
+            echo "- **firq-tower** v${TOWER_VERSION}"
+            echo "  - crates.io: https://crates.io/crates/firq-tower"
+            echo "  - docs.rs: https://docs.rs/firq-tower/${TOWER_VERSION}"
+            echo
+            echo "## Notes"
+            echo
+            echo "- \`firq-examples\` and \`firq-bench\` are support crates and are not published to crates.io."
+          } > RELEASE_NOTES.md
+      - name: create-github-release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: true

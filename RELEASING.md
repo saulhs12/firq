@@ -17,6 +17,15 @@ Behavior:
 - Publishing uses retries to tolerate crates.io index propagation delay.
 - The job requires the repository secret `CARGO_REGISTRY_TOKEN`.
 
+## GitHub Release links to crates.io/docs.rs
+
+Pushing a version tag (`v*`) triggers `.github/workflows/release.yml`.
+
+The workflow creates a GitHub Release that includes direct links for:
+
+- crates.io package page for `firq-core`, `firq-async`, `firq-tower`
+- docs.rs page pinned to each crate version
+
 ## Preconditions
 
 Run release gates from repository root:

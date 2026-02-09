@@ -1,5 +1,11 @@
 # Firq — Multi-tenant Scheduler for Rust Services
 
+[![Crates.io (firq-core)](https://img.shields.io/crates/v/firq-core.svg)](https://crates.io/crates/firq-core)
+[![Crates.io (firq-async)](https://img.shields.io/crates/v/firq-async.svg)](https://crates.io/crates/firq-async)
+[![Crates.io (firq-tower)](https://img.shields.io/crates/v/firq-tower.svg)](https://crates.io/crates/firq-tower)
+[![Docs.rs (firq-core)](https://docs.rs/firq-core/badge.svg)](https://docs.rs/firq-core)
+[![Docs.rs (firq-async)](https://docs.rs/firq-async/badge.svg)](https://docs.rs/firq-async)
+[![Docs.rs (firq-tower)](https://docs.rs/firq-tower/badge.svg)](https://docs.rs/firq-tower)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 **Firq** is an in-process scheduler for Rust backends that need stable tail latency under contention.
