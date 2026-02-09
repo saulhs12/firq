@@ -14,12 +14,13 @@
 //! - La implementación posterior añadirá sharding, ring de tenants activos y señalización de “hay trabajo”.
 
 mod api;
+pub mod prometheus;
 mod scheduler;
 mod state;
 
 pub use api::{
-    BackpressurePolicy, DequeueResult, EnqueueRejectReason, EnqueueResult, SchedulerConfig,
-    SchedulerStats, Task, TenantKey,
+    BackpressurePolicy, DequeueResult, EnqueueRejectReason, EnqueueResult, Priority,
+    QueueTimeBucket, SchedulerConfig, SchedulerStats, Task, TenantCount, TenantKey,
 };
 pub use scheduler::Scheduler;
 
