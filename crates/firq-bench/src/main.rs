@@ -191,7 +191,7 @@ fn hot_tenant_sustained() -> Scenario {
 
     Scenario {
         name: "hot_tenant_sustained",
-        description: "Un tenant hot sostenido compite contra muchos tenants cold",
+        description: "A sustained hot tenant competes with many cold tenants",
         run_seconds: Some(6),
         work_ms: 1,
         max_global: Some(50_000),
@@ -216,7 +216,7 @@ fn burst_massive() -> Scenario {
 
     Scenario {
         name: "burst_massive",
-        description: "Burst masivo de productores simultáneos",
+        description: "Massive burst of simultaneous producers",
         run_seconds: Some(4),
         work_ms: 2,
         max_global: Some(6_000),
@@ -264,7 +264,7 @@ fn mixed_priorities() -> Scenario {
 
     Scenario {
         name: "mixed_priorities",
-        description: "Mezcla de prioridades High/Normal/Low bajo carga",
+        description: "Mixed High/Normal/Low priorities under load",
         run_seconds: None,
         work_ms: 2,
         max_global: None,
@@ -289,7 +289,7 @@ fn deadline_expiration() -> Scenario {
 
     Scenario {
         name: "deadline_expiration",
-        description: "Deadlines cortos para forzar expiraciones en dequeue",
+        description: "Short deadlines to force dequeue expirations",
         run_seconds: Some(5),
         work_ms: 6,
         max_global: Some(4_000),
@@ -314,7 +314,7 @@ fn capacity_pressure() -> Scenario {
 
     Scenario {
         name: "capacity_pressure",
-        description: "Presión de capacidad global y por tenant",
+        description: "Global and per-tenant capacity pressure",
         run_seconds: Some(5),
         work_ms: 3,
         max_global: Some(2_000),

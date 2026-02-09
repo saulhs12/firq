@@ -1,3 +1,12 @@
+//! Tower integration for Firq scheduling.
+//!
+//! `firq-tower` exposes a configurable layer that:
+//! - extracts a tenant key from requests
+//! - enqueues requests through Firq
+//! - supports cancellation before execution turn
+//! - enforces in-flight limits with a semaphore
+//! - maps scheduling rejections to HTTP-friendly errors
+
 mod builder;
 pub use builder::Firq;
 pub use firq_async::{
@@ -21,16 +30,23 @@ use tower_service::Service;
 pub(crate) type ErasedDeadlineExtractor =
     Arc<dyn Fn(&dyn Any) -> Option<std::time::Instant> + Send + Sync>;
 
+/// Function used to map enqueue rejections into HTTP-facing errors.
 pub type RejectionMapper = Arc<dyn Fn(EnqueueRejectReason) -> FirqHttpRejection + Send + Sync>;
 
+/// Structured HTTP rejection payload produced by the layer.
 #[derive(Clone, Debug)]
 pub struct FirqHttpRejection {
+    /// HTTP status code.
     pub status: u16,
+    /// Stable machine-readable error code.
     pub code: &'static str,
+    /// Human-readable error message.
     pub message: &'static str,
+    /// Underlying scheduling rejection reason.
     pub reason: EnqueueRejectReason,
 }
 
+/// Default mapping from scheduler rejection reasons to HTTP responses.
 pub fn default_rejection_mapper(reason: EnqueueRejectReason) -> FirqHttpRejection {
     match reason {
         EnqueueRejectReason::TenantFull => FirqHttpRejection {
@@ -54,15 +70,21 @@ pub fn default_rejection_mapper(reason: EnqueueRejectReason) -> FirqHttpRejectio
     }
 }
 
+/// Internal permit payload sent to the background dequeue worker.
 pub struct FirqPermit {
     tx: oneshot::Sender<()>,
 }
 
+/// Layer/service error type.
 #[derive(Debug)]
 pub enum FirqError<E> {
+    /// Error returned by the wrapped inner service.
     Service(E),
+    /// Request rejected by scheduler policy.
     Rejected(FirqHttpRejection),
+    /// Scheduler has been closed.
     Closed,
+    /// Failed waiting for permit (expired/dropped/cancelled).
     PermitError,
 }
 
@@ -93,6 +115,7 @@ impl<E: std::error::Error + 'static> std::error::Error for FirqError<E> {
 }
 
 pub trait KeyExtractor<Request>: Clone {
+    /// Extracts a tenant key from an incoming request.
     fn extract(&self, req: &Request) -> TenantKey;
 }
 
@@ -105,6 +128,7 @@ where
     }
 }
 
+/// Tower `Layer` implementation configured with a Firq scheduler.
 pub struct FirqLayer<Request, K> {
     scheduler: AsyncScheduler<FirqPermit>,
     extractor: K,
@@ -132,6 +156,7 @@ impl<Request, K: Clone> Clone for FirqLayer<Request, K> {
 }
 
 impl<Request, K> FirqLayer<Request, K> {
+    /// Creates a new `FirqLayer`.
     pub fn new(
         scheduler: AsyncScheduler<FirqPermit>,
         extractor: K,
@@ -170,15 +195,18 @@ impl<Request, K> FirqLayer<Request, K> {
         &self.scheduler
     }
 
+    /// Returns configured in-flight execution limit.
     pub fn in_flight_limit(&self) -> usize {
         self.max_in_flight
     }
 
+    /// Returns currently active in-flight executions.
     pub fn in_flight_active(&self) -> usize {
         self.max_in_flight
             .saturating_sub(self.in_flight.available_permits())
     }
 
+    /// Returns current in-flight saturation ratio in `[0.0, 1.0+]`.
     pub fn in_flight_saturation_ratio(&self) -> f64 {
         if self.max_in_flight == 0 {
             0.0
@@ -189,6 +217,7 @@ impl<Request, K> FirqLayer<Request, K> {
 }
 
 impl<Request> FirqLayer<Request, ()> {
+    /// Returns the `Firq` builder.
     pub fn builder() -> Firq {
         Firq::new()
     }
@@ -214,6 +243,7 @@ where
     }
 }
 
+/// Tower `Service` produced by [`FirqLayer`].
 pub struct FirqService<S, K, Request> {
     inner: S,
     scheduler: AsyncScheduler<FirqPermit>,

@@ -37,9 +37,9 @@ async fn main() {
         .await
         .unwrap();
 
-    println!("🚀 Server running on http://127.0.0.1:3000");
-    println!("📊 Stats: http://127.0.0.1:3000/api/stats");
-    println!("\nEjemplos de uso:");
+    println!("Server running on http://127.0.0.1:3000");
+    println!("Stats: http://127.0.0.1:3000/api/stats");
+    println!("\nExample requests:");
     println!("  curl -H 'X-Tenant-ID: 1' http://127.0.0.1:3000/");
     println!("  curl -H 'X-Tenant-ID: 2' http://127.0.0.1:3000/api/users\n");
 

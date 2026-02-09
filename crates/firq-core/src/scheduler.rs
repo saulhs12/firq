@@ -18,6 +18,7 @@ const SHUTDOWN_OPEN: u8 = 0;
 const SHUTDOWN_DRAIN: u8 = 1;
 const SHUTDOWN_IMMEDIATE: u8 = 2;
 
+/// Multi-tenant in-process scheduler with DRR fairness and explicit backpressure.
 pub struct Scheduler<T> {
     config: SchedulerConfig,
     shards: Vec<Mutex<Shard<T>>>,
@@ -229,17 +230,20 @@ impl<T> Scheduler<T> {
         }
     }
 
+    /// Sets a static DRR quantum override for a tenant.
     pub fn set_tenant_quantum(&self, tenant: TenantKey, quantum: u64) {
         let value = quantum.max(1);
         self.tenant_quantum.write().insert(tenant, value);
         self.refresh_tenant_quantum(tenant);
     }
 
+    /// Removes a static DRR quantum override for a tenant.
     pub fn clear_tenant_quantum(&self, tenant: TenantKey) {
         self.tenant_quantum.write().remove(&tenant);
         self.refresh_tenant_quantum(tenant);
     }
 
+    /// Sets or clears the dynamic per-tenant quantum provider.
     pub fn set_quantum_provider(&self, provider: Option<QuantumProvider>) {
         {
             let mut guard = self.quantum_provider.write();
@@ -254,6 +258,7 @@ impl<T> Scheduler<T> {
         }
     }
 
+    /// Creates a scheduler with the provided configuration.
     pub fn new(config: SchedulerConfig) -> Self {
         let shard_count = config.shards.max(1);
         let top_tenants_capacity = config.top_tenants_capacity;
@@ -280,6 +285,7 @@ impl<T> Scheduler<T> {
         }
     }
 
+    /// Enqueues a task without returning a cancel handle.
     pub fn enqueue(&self, tenant: TenantKey, task: Task<T>) -> EnqueueResult {
         match self.enqueue_with_handle(tenant, task) {
             EnqueueWithHandleResult::Enqueued(_) => EnqueueResult::Enqueued,
@@ -288,6 +294,7 @@ impl<T> Scheduler<T> {
         }
     }
 
+    /// Enqueues a task and returns a [`TaskHandle`] that can be cancelled.
     pub fn enqueue_with_handle(&self, tenant: TenantKey, task: Task<T>) -> EnqueueWithHandleResult {
         match self.backpressure_for(tenant).clone() {
             crate::api::BackpressurePolicy::Reject => self.enqueue_reject_with_handle(tenant, task),
@@ -303,6 +310,10 @@ impl<T> Scheduler<T> {
         }
     }
 
+    /// Cancels a pending task identified by handle.
+    ///
+    /// Cancellation is best-effort for pending work and does not affect tasks
+    /// that have already been dequeued for execution.
     pub fn cancel(&self, handle: TaskHandle) -> CancelResult {
         let id = handle.as_u64();
         if self.take_pending(id) {
@@ -315,6 +326,7 @@ impl<T> Scheduler<T> {
         }
     }
 
+    /// Attempts to dequeue one task without blocking.
     pub fn try_dequeue(&self) -> DequeueResult<T> {
         if self.shutdown_state() == SHUTDOWN_IMMEDIATE {
             return DequeueResult::Closed;
@@ -466,6 +478,7 @@ impl<T> Scheduler<T> {
         None
     }
 
+    /// Dequeues one task, blocking until work is available or scheduler closes.
     pub fn dequeue_blocking(&self) -> DequeueResult<T> {
         const BACKOFF_SPINS: u32 = 64;
         const BACKOFF_SLEEP: Duration = Duration::from_micros(200);
@@ -503,6 +516,7 @@ impl<T> Scheduler<T> {
         }
     }
 
+    /// Returns a snapshot of current scheduler metrics.
     pub fn stats(&self) -> SchedulerStats {
         let queue_time_histogram = QUEUE_TIME_BUCKETS_NS
             .iter()
@@ -563,18 +577,22 @@ impl<T> Scheduler<T> {
         }
     }
 
+    /// Alias for [`Scheduler::close_immediate`].
     pub fn close(&self) {
         self.close_immediate();
     }
 
+    /// Closes immediately: stops accepting new work and wakes blocked consumers.
     pub fn close_immediate(&self) {
         self.set_shutdown_mode(CloseMode::Immediate);
     }
 
+    /// Closes in drain mode: stops accepting and drains queued work before closing.
     pub fn close_drain(&self) {
         self.set_shutdown_mode(CloseMode::Drain);
     }
 
+    /// Closes using the provided mode.
     pub fn close_with_mode(&self, mode: CloseMode) {
         self.set_shutdown_mode(mode);
     }

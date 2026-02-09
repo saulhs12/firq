@@ -71,8 +71,8 @@ async fn main() {
         .await
         .unwrap();
 
-    println!("🚀 Server running on http://127.0.0.1:3000");
-    println!("📊 Try with: curl -H 'X-Tenant-ID: 1' http://127.0.0.1:3000");
+    println!("Server running on http://127.0.0.1:3000");
+    println!("Try with: curl -H 'X-Tenant-ID: 1' http://127.0.0.1:3000");
 
     axum::serve(listener, app).await.unwrap();
 }

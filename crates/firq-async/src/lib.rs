@@ -1,3 +1,10 @@
+//! Tokio adapter for `firq-core`.
+//!
+//! This crate provides async wrappers around the core scheduler, including:
+//! - `AsyncScheduler` for enqueue/dequeue operations
+//! - `AsyncReceiver` and `AsyncStream` helpers
+//! - `Dispatcher` with bounded in-flight execution
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -11,6 +18,7 @@ pub use firq_core::{
 use futures_core::Stream;
 use tokio::sync::Semaphore;
 
+/// Async wrapper around [`Scheduler`].
 pub struct AsyncScheduler<T> {
     inner: Arc<Scheduler<T>>,
 }
@@ -24,60 +32,74 @@ impl<T> Clone for AsyncScheduler<T> {
 }
 
 impl<T> AsyncScheduler<T> {
+    /// Creates a new async wrapper over a shared core scheduler.
     pub fn new(inner: Arc<Scheduler<T>>) -> Self {
         Self { inner }
     }
 
+    /// Returns the shared core scheduler.
     pub fn inner(&self) -> &Arc<Scheduler<T>> {
         &self.inner
     }
 
+    /// Enqueues a task.
     pub fn enqueue(&self, tenant: TenantKey, task: Task<T>) -> EnqueueResult {
         self.inner.enqueue(tenant, task)
     }
 
+    /// Enqueues a task and returns a cancellation handle.
     pub fn enqueue_with_handle(&self, tenant: TenantKey, task: Task<T>) -> EnqueueWithHandleResult {
         self.inner.enqueue_with_handle(tenant, task)
     }
 
+    /// Non-blocking dequeue attempt.
     pub fn try_dequeue(&self) -> DequeueResult<T> {
         self.inner.try_dequeue()
     }
 
+    /// Attempts to cancel pending work by handle.
     pub fn cancel(&self, handle: TaskHandle) -> CancelResult {
         self.inner.cancel(handle)
     }
 
+    /// Returns scheduler metric snapshot.
     pub fn stats(&self) -> SchedulerStats {
         self.inner.stats()
     }
 
+    /// Alias for [`AsyncScheduler::close_immediate`].
     pub fn close(&self) {
         self.inner.close_immediate();
     }
 
+    /// Closes immediately.
     pub fn close_immediate(&self) {
         self.inner.close_immediate();
     }
 
+    /// Closes in drain mode.
     pub fn close_drain(&self) {
         self.inner.close_drain();
     }
 
+    /// Closes using a specific mode.
     pub fn close_with_mode(&self, mode: CloseMode) {
         self.inner.close_with_mode(mode);
     }
 
+    /// Returns a receiver-style async dequeue helper.
     pub fn receiver(&self) -> AsyncReceiver<T> {
         AsyncReceiver::new(self.clone())
     }
 
+    /// Returns a `Stream` wrapper for dequeue operations.
     pub fn stream(&self) -> AsyncStream<T> {
         AsyncStream::new(self.clone())
     }
 }
 
 impl<T: Send + 'static> AsyncScheduler<T> {
+    /// Performs blocking dequeue on a Tokio blocking thread.
     pub async fn dequeue_async(&self) -> DequeueResult<T> {
         let scheduler = Arc::clone(&self.inner);
         match tokio::task::spawn_blocking(move || scheduler.dequeue_blocking()).await {
@@ -87,23 +109,29 @@ impl<T: Send + 'static> AsyncScheduler<T> {
     }
 }
 
+/// Dequeued tenant/task pair.
 pub struct DequeueItem<T> {
+    /// Tenant selected by scheduler.
     pub tenant: TenantKey,
+    /// Dequeued task.
     pub task: Task<T>,
 }
 
+/// Receiver-style async facade over scheduler dequeue.
 #[derive(Clone)]
 pub struct AsyncReceiver<T> {
     scheduler: AsyncScheduler<T>,
 }
 
 impl<T> AsyncReceiver<T> {
+    /// Creates a new receiver facade.
     pub fn new(scheduler: AsyncScheduler<T>) -> Self {
         Self { scheduler }
     }
 }
 
 impl<T: Send + 'static> AsyncReceiver<T> {
+    /// Waits for the next task, returning `None` once scheduler closes.
     pub async fn recv(&self) -> Option<DequeueItem<T>> {
         loop {
             match self.scheduler.dequeue_async().await {
@@ -119,12 +147,14 @@ impl<T: Send + 'static> AsyncReceiver<T> {
     }
 }
 
+/// `Stream` adapter for dequeue operations.
 pub struct AsyncStream<T> {
     scheduler: AsyncScheduler<T>,
     pending: Option<Pin<Box<dyn Future<Output = DequeueResult<T>> + Send>>>,
 }
 
 impl<T> AsyncStream<T> {
+    /// Creates a new stream adapter.
     pub fn new(scheduler: AsyncScheduler<T>) -> Self {
         Self {
             scheduler,
@@ -174,6 +204,7 @@ pub struct Dispatcher<T> {
 }
 
 impl<T> Dispatcher<T> {
+    /// Creates a dispatcher with bounded in-flight handler executions.
     pub fn new(scheduler: AsyncScheduler<T>, max_in_flight: usize) -> Self {
         let max_in_flight = max_in_flight.max(1);
         Self {
@@ -185,6 +216,7 @@ impl<T> Dispatcher<T> {
 }
 
 impl<T: Send + 'static> Dispatcher<T> {
+    /// Runs the dequeue loop and executes each task with the provided async handler.
     pub async fn run<F, Fut>(&self, handler: F)
     where
         F: Fn(DequeueItem<T>) -> Fut + Send + Sync + 'static,
