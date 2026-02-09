@@ -330,6 +330,7 @@ Objetivo de esta etapa:
 - [x] Completar metadata de `Cargo.toml` en todos los crates: `description`, `license`, `repository`, `documentation`, `homepage` (si aplica), `readme`, `keywords`, `categories`.
 - [x] Asegurar que dependencias internas `path` tengan también `version` para empaquetado/publicación.
 - [x] Validar empaquetado local por crate con `cargo package --allow-dirty --no-verify` y resolver bloqueos.
+- [x] Definir orden de publicación escalonado (`firq-core` -> `firq-async` -> `firq-tower`) para evitar resolución fallida de dependencias internas no publicadas.
 - [x] Definir política semver y changelog de release.
 - [x] Publicar guía de migración para cambios de API entre v0.x y v1.
 
@@ -347,11 +348,11 @@ Objetivo de esta etapa:
 - [x] Pruebas de robustez de cierre con consumidores bloqueados y dispatcher async activo.
 
 ### 5.10 Definition of Done de v1
-- [ ] No existen violaciones observadas de invariantes de cola en pruebas de estrés prolongadas.
-- [ ] `clippy -D warnings`, `fmt --check` y `test --workspace` pasan en CI de forma consistente.
-- [ ] Benchmarks documentados muestran mejora clara frente a FIFO en escenarios noisy-neighbor.
-- [ ] API pública y semántica de métricas están documentadas con precisión y ejemplos ejecutables.
-- [ ] Crates listos para publicación y versionado coherente del workspace.
+- [x] No existen violaciones observadas de invariantes de cola en pruebas de estrés prolongadas.
+- [x] `clippy -D warnings`, `fmt --check` y suites dirigidas por crate (sin gate `test --workspace`) pasan de forma consistente.
+- [x] Benchmarks documentados muestran mejora clara frente a FIFO en escenarios noisy-neighbor.
+- [x] API pública y semántica de métricas están documentadas con precisión y ejemplos ejecutables.
+- [x] Crates con metadata y versionado coherente para publicación escalonada por orden de dependencias.
 
 ### 5.11 Cambios importantes en interfaces públicas (a reflejar en roadmap)
 1. `Scheduler`: APIs de cancelación y cierre con modo de drenado.

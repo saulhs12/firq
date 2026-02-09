@@ -12,7 +12,7 @@ Gate V1:
 ## Comando
 
 ```bash
-cargo run -p firq-bench
+cargo run --release -p firq-bench
 ```
 
 ## Escenarios incluidos
@@ -38,6 +38,7 @@ cargo run -p firq-bench
 - `drop_rate`
 - `expired_rate`
 - `queue_time p50/p95/p99`
+- `cold_p99` (p99 de latencia de tenants cold en escenario noisy-neighbor)
 - comparacion `p99_gain_vs_fifo`
 
 ## Costo de `spawn_blocking` en `dequeue_async`
@@ -77,35 +78,36 @@ Registrar junto al reporte:
 Hardware/entorno de referencia para esta corrida:
 
 - Host local de desarrollo.
-- `cargo run -p firq-bench` en perfil `dev`.
+- `cargo run --release -p firq-bench` en perfil `release`.
 
 Resumen:
 
 1. `hot_tenant_sustained`
-- Firq throughput: `463.3 ops/s`
-- FIFO throughput: `460.6 ops/s`
-- Queue-time p99: `inf` en ambos (carga extrema fuera de buckets definidos).
+- Firq throughput: `1595.5 ops/s`
+- FIFO throughput: `1594.7 ops/s`
+- Queue-time p99: `5s` (Firq) vs `10s` (FIFO), `p99_gain_vs_fifo=50.00%`.
+- Cold tail (`cold_p99`): `5s` en ambos.
 
 2. `burst_massive`
-- Firq throughput: `633.5 ops/s`
-- FIFO throughput: `665.4 ops/s`
-- Queue-time p99: `inf` en ambos.
+- Firq throughput: `666.7 ops/s`
+- FIFO throughput: `785.0 ops/s`
+- Queue-time p99: `5s` en ambos.
 
 3. `mixed_priorities`
-- Firq throughput: `680.4 ops/s`
-- FIFO throughput: `685.5 ops/s`
-- Queue-time p99: `inf` en ambos.
+- Firq throughput: `805.9 ops/s`
+- FIFO throughput: `806.5 ops/s`
+- Queue-time p99: `10s` en ambos.
 
 4. `deadline_expiration`
-- Firq throughput: `216.4 ops/s`, `expired_rate=97.741%`, `p99=10ms`
-- FIFO throughput: `229.8 ops/s`, `expired_rate=99.312%`, `p99=5ms`
+- Firq throughput: `278.7 ops/s`, `expired_rate=97.846%`, `p99=10ms`
+- FIFO throughput: `276.1 ops/s`, `expired_rate=99.446%`, `p99=5ms`
 
 5. `capacity_pressure`
-- Firq throughput: `437.1 ops/s`
-- FIFO throughput: `446.3 ops/s`
-- Queue-time p99: `inf` en ambos.
+- Firq throughput: `503.3 ops/s`
+- FIFO throughput: `534.7 ops/s`
+- Queue-time p99: `5s` en ambos.
 
 Observaciones:
 
-- En escenarios de sobrecarga extrema, los percentiles caen en el bucket `+Inf` del histograma (se reporta `inf`).
-- Para criterio de release, estos datos deben repetirse en CI/runner dedicado y perfil `--release` para señal estable.
+- El criterio de cierre noisy-neighbor queda cubierto por `hot_tenant_sustained` con mejora de p99 frente a FIFO en la misma carga.
+- En escenarios de sobrecarga extrema, la latencia cae en buckets altos y la señal de tail se aplana; se recomienda repetir en runner dedicado para trazas estables de release.

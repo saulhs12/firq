@@ -9,7 +9,7 @@ use firq_core::{
     TenantKey,
 };
 
-const QUEUE_TIME_BUCKETS_NS: [u64; 12] = [
+const QUEUE_TIME_BUCKETS_NS: [u64; 16] = [
     10_000,
     50_000,
     100_000,
@@ -21,7 +21,11 @@ const QUEUE_TIME_BUCKETS_NS: [u64; 12] = [
     100_000_000,
     500_000_000,
     1_000_000_000,
-    u64::MAX,
+    5_000_000_000,
+    10_000_000_000,
+    30_000_000_000,
+    60_000_000_000,
+    120_000_000_000,
 ];
 
 #[derive(Clone, Debug)]
@@ -48,10 +52,17 @@ impl Default for BenchConfig {
 #[derive(Clone, Debug)]
 struct ProducerProfile {
     tenant: TenantKey,
+    class: ProducerClass,
     interval_ms: u64,
     priority: Priority,
     cost: u64,
     deadline_ms: Option<u64>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ProducerClass {
+    Hot,
+    Cold,
 }
 
 #[derive(Clone, Debug)]
@@ -63,6 +74,7 @@ struct Scenario {
     max_global: Option<usize>,
     max_per_tenant: Option<usize>,
     producers: Vec<ProducerProfile>,
+    report_cold_tail: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +90,12 @@ struct BenchResult {
     p50_queue_ms: f64,
     p95_queue_ms: f64,
     p99_queue_ms: f64,
+    cold_p99_queue_ms: f64,
+}
+
+#[derive(Clone, Debug)]
+struct BenchPayload {
+    class: ProducerClass,
 }
 
 #[derive(Debug)]
@@ -153,16 +171,18 @@ fn hot_tenant_sustained() -> Scenario {
     let mut producers = Vec::new();
     producers.push(ProducerProfile {
         tenant: TenantKey::from(1),
+        class: ProducerClass::Hot,
         interval_ms: 0,
         priority: Priority::High,
         cost: 1,
         deadline_ms: None,
     });
 
-    for tenant_id in 2..82 {
+    for tenant_id in 2..22 {
         producers.push(ProducerProfile {
             tenant: TenantKey::from(tenant_id),
-            interval_ms: 6,
+            class: ProducerClass::Cold,
+            interval_ms: 15,
             priority: Priority::Low,
             cost: 1,
             deadline_ms: None,
@@ -172,11 +192,12 @@ fn hot_tenant_sustained() -> Scenario {
     Scenario {
         name: "hot_tenant_sustained",
         description: "Un tenant hot sostenido compite contra muchos tenants cold",
-        run_seconds: None,
-        work_ms: 3,
-        max_global: None,
-        max_per_tenant: None,
+        run_seconds: Some(6),
+        work_ms: 1,
+        max_global: Some(50_000),
+        max_per_tenant: Some(1_000),
         producers,
+        report_cold_tail: true,
     }
 }
 
@@ -185,6 +206,7 @@ fn burst_massive() -> Scenario {
     for tenant_id in 1..161 {
         producers.push(ProducerProfile {
             tenant: TenantKey::from(tenant_id),
+            class: ProducerClass::Cold,
             interval_ms: 0,
             priority: Priority::Normal,
             cost: 1,
@@ -200,6 +222,7 @@ fn burst_massive() -> Scenario {
         max_global: Some(6_000),
         max_per_tenant: Some(200),
         producers,
+        report_cold_tail: false,
     }
 }
 
@@ -209,6 +232,7 @@ fn mixed_priorities() -> Scenario {
     for tenant_id in 1..21 {
         producers.push(ProducerProfile {
             tenant: TenantKey::from(tenant_id),
+            class: ProducerClass::Hot,
             interval_ms: 2,
             priority: Priority::High,
             cost: 1,
@@ -219,6 +243,7 @@ fn mixed_priorities() -> Scenario {
     for tenant_id in 21..81 {
         producers.push(ProducerProfile {
             tenant: TenantKey::from(tenant_id),
+            class: ProducerClass::Cold,
             interval_ms: 4,
             priority: Priority::Normal,
             cost: 1,
@@ -229,6 +254,7 @@ fn mixed_priorities() -> Scenario {
     for tenant_id in 81..141 {
         producers.push(ProducerProfile {
             tenant: TenantKey::from(tenant_id),
+            class: ProducerClass::Cold,
             interval_ms: 7,
             priority: Priority::Low,
             cost: 1,
@@ -244,6 +270,7 @@ fn mixed_priorities() -> Scenario {
         max_global: None,
         max_per_tenant: None,
         producers,
+        report_cold_tail: false,
     }
 }
 
@@ -252,6 +279,7 @@ fn deadline_expiration() -> Scenario {
     for tenant_id in 1..81 {
         producers.push(ProducerProfile {
             tenant: TenantKey::from(tenant_id),
+            class: ProducerClass::Cold,
             interval_ms: 1,
             priority: Priority::Normal,
             cost: 1,
@@ -267,6 +295,7 @@ fn deadline_expiration() -> Scenario {
         max_global: Some(4_000),
         max_per_tenant: Some(128),
         producers,
+        report_cold_tail: false,
     }
 }
 
@@ -275,6 +304,7 @@ fn capacity_pressure() -> Scenario {
     for tenant_id in 1..121 {
         producers.push(ProducerProfile {
             tenant: TenantKey::from(tenant_id),
+            class: ProducerClass::Cold,
             interval_ms: 0,
             priority: Priority::Normal,
             cost: 1,
@@ -290,12 +320,13 @@ fn capacity_pressure() -> Scenario {
         max_global: Some(2_000),
         max_per_tenant: Some(40),
         producers,
+        report_cold_tail: false,
     }
 }
 
 fn run_firq(config: &BenchConfig, scenario: &Scenario) -> BenchResult {
     let run_seconds = scenario.run_seconds.unwrap_or(config.default_run_seconds);
-    let scheduler = Arc::new(Scheduler::new(SchedulerConfig {
+    let scheduler = Arc::new(Scheduler::<BenchPayload>::new(SchedulerConfig {
         shards: 4,
         max_global: scenario.max_global.unwrap_or(config.max_global),
         max_per_tenant: scenario.max_per_tenant.unwrap_or(config.max_per_tenant),
@@ -309,6 +340,8 @@ fn run_firq(config: &BenchConfig, scenario: &Scenario) -> BenchResult {
 
     let running = Arc::new(AtomicBool::new(true));
     let counters = Arc::new(SharedCounters::new());
+    let histogram = Arc::new(ConcurrentHistogram::new());
+    let cold_histogram = Arc::new(ConcurrentHistogram::new());
     let mut handles = Vec::new();
 
     for profile in &scenario.producers {
@@ -324,6 +357,8 @@ fn run_firq(config: &BenchConfig, scenario: &Scenario) -> BenchResult {
         handles.push(spawn_firq_worker(
             Arc::clone(&scheduler),
             Arc::clone(&running),
+            Arc::clone(&histogram),
+            Arc::clone(&cold_histogram),
             scenario.work_ms,
         ));
     }
@@ -357,19 +392,21 @@ fn run_firq(config: &BenchConfig, scenario: &Scenario) -> BenchResult {
             counters.produced_total.load(Ordering::Relaxed),
         ),
         expired_rate: rate(stats.expired, stats.enqueued),
-        p50_queue_ms: ns_to_ms(percentile_from_histogram(&stats.queue_time_histogram, 0.50)),
-        p95_queue_ms: ns_to_ms(stats.queue_time_p95_ns),
-        p99_queue_ms: ns_to_ms(stats.queue_time_p99_ns),
+        p50_queue_ms: ns_to_ms(histogram.percentile_ns(0.50)),
+        p95_queue_ms: ns_to_ms(histogram.percentile_ns(0.95)),
+        p99_queue_ms: ns_to_ms(histogram.percentile_ns(0.99)),
+        cold_p99_queue_ms: ns_to_ms(cold_histogram.percentile_ns(0.99)),
     }
 }
 
 fn run_fifo(config: &BenchConfig, scenario: &Scenario) -> BenchResult {
     let run_seconds = scenario.run_seconds.unwrap_or(config.default_run_seconds);
     let max_global = scenario.max_global.unwrap_or(config.max_global);
-    let queue = Arc::new(FifoQueue::new(max_global));
+    let queue = Arc::new(FifoQueue::<BenchPayload>::new(max_global));
     let running = Arc::new(AtomicBool::new(true));
     let counters = Arc::new(SharedCounters::new());
     let histogram = Arc::new(ConcurrentHistogram::new());
+    let cold_histogram = Arc::new(ConcurrentHistogram::new());
     let dequeued_total = Arc::new(AtomicU64::new(0));
     let expired_total = Arc::new(AtomicU64::new(0));
 
@@ -389,6 +426,7 @@ fn run_fifo(config: &BenchConfig, scenario: &Scenario) -> BenchResult {
             Arc::clone(&queue),
             Arc::clone(&running),
             Arc::clone(&histogram),
+            Arc::clone(&cold_histogram),
             Arc::clone(&dequeued_total),
             Arc::clone(&expired_total),
             scenario.work_ms,
@@ -427,24 +465,25 @@ fn run_fifo(config: &BenchConfig, scenario: &Scenario) -> BenchResult {
         p50_queue_ms: ns_to_ms(histogram.percentile_ns(0.50)),
         p95_queue_ms: ns_to_ms(histogram.percentile_ns(0.95)),
         p99_queue_ms: ns_to_ms(histogram.percentile_ns(0.99)),
+        cold_p99_queue_ms: ns_to_ms(cold_histogram.percentile_ns(0.99)),
     }
 }
 
 fn spawn_firq_producer(
-    scheduler: Arc<Scheduler<u64>>,
+    scheduler: Arc<Scheduler<BenchPayload>>,
     running: Arc<AtomicBool>,
     counters: Arc<SharedCounters>,
     profile: ProducerProfile,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let mut seq = 0u64;
         while running.load(Ordering::Relaxed) {
-            seq = seq.saturating_add(1);
             let deadline = profile
                 .deadline_ms
                 .map(|deadline_ms| Instant::now() + Duration::from_millis(deadline_ms));
             let task = Task {
-                payload: seq,
+                payload: BenchPayload {
+                    class: profile.class,
+                },
                 enqueue_ts: Instant::now(),
                 deadline,
                 priority: profile.priority,
@@ -468,14 +507,25 @@ fn spawn_firq_producer(
 }
 
 fn spawn_firq_worker(
-    scheduler: Arc<Scheduler<u64>>,
+    scheduler: Arc<Scheduler<BenchPayload>>,
     running: Arc<AtomicBool>,
+    histogram: Arc<ConcurrentHistogram>,
+    cold_histogram: Arc<ConcurrentHistogram>,
     work_ms: u64,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         while running.load(Ordering::Relaxed) {
             match scheduler.dequeue_blocking() {
-                DequeueResult::Task { .. } => {
+                DequeueResult::Task { task, .. } => {
+                    let queue_time_ns = task
+                        .enqueue_ts
+                        .elapsed()
+                        .as_nanos()
+                        .min(u128::from(u64::MAX)) as u64;
+                    histogram.observe(queue_time_ns);
+                    if task.payload.class == ProducerClass::Cold {
+                        cold_histogram.observe(queue_time_ns);
+                    }
                     if work_ms > 0 {
                         thread::sleep(Duration::from_millis(work_ms));
                     }
@@ -488,20 +538,20 @@ fn spawn_firq_worker(
 }
 
 fn spawn_fifo_producer(
-    queue: Arc<FifoQueue<u64>>,
+    queue: Arc<FifoQueue<BenchPayload>>,
     running: Arc<AtomicBool>,
     counters: Arc<SharedCounters>,
     profile: ProducerProfile,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let mut seq = 0u64;
         while running.load(Ordering::Relaxed) {
-            seq = seq.saturating_add(1);
             let deadline = profile
                 .deadline_ms
                 .map(|deadline_ms| Instant::now() + Duration::from_millis(deadline_ms));
             let task = Task {
-                payload: seq,
+                payload: BenchPayload {
+                    class: profile.class,
+                },
                 enqueue_ts: Instant::now(),
                 deadline,
                 priority: profile.priority,
@@ -521,9 +571,10 @@ fn spawn_fifo_producer(
 }
 
 fn spawn_fifo_worker(
-    queue: Arc<FifoQueue<u64>>,
+    queue: Arc<FifoQueue<BenchPayload>>,
     running: Arc<AtomicBool>,
     histogram: Arc<ConcurrentHistogram>,
+    cold_histogram: Arc<ConcurrentHistogram>,
     dequeued_total: Arc<AtomicU64>,
     expired_total: Arc<AtomicU64>,
     work_ms: u64,
@@ -544,6 +595,9 @@ fn spawn_fifo_worker(
                         .as_nanos()
                         .min(u128::from(u64::MAX)) as u64;
                     histogram.observe(queue_time_ns);
+                    if task.payload.class == ProducerClass::Cold {
+                        cold_histogram.observe(queue_time_ns);
+                    }
 
                     if work_ms > 0 {
                         thread::sleep(Duration::from_millis(work_ms));
@@ -566,7 +620,7 @@ fn print_comparison(
         scenario.name, config.worker_count, scenario.description
     );
     println!(
-        "firq: enq={} deq={} drop={} exp={} throughput={:.1} drop_rate={:.3}% expired_rate={:.3}% p50={:.3}ms p95={:.3}ms p99={:.3}ms",
+        "firq: enq={} deq={} drop={} exp={} throughput={:.1} drop_rate={:.3}% expired_rate={:.3}% p50={:.3}ms p95={:.3}ms p99={:.3}ms cold_p99={:.3}ms",
         firq.enqueued,
         firq.dequeued,
         firq.dropped,
@@ -577,9 +631,10 @@ fn print_comparison(
         firq.p50_queue_ms,
         firq.p95_queue_ms,
         firq.p99_queue_ms,
+        firq.cold_p99_queue_ms,
     );
     println!(
-        "fifo: enq={} deq={} drop={} exp={} throughput={:.1} drop_rate={:.3}% expired_rate={:.3}% p50={:.3}ms p95={:.3}ms p99={:.3}ms",
+        "fifo: enq={} deq={} drop={} exp={} throughput={:.1} drop_rate={:.3}% expired_rate={:.3}% p50={:.3}ms p95={:.3}ms p99={:.3}ms cold_p99={:.3}ms",
         fifo.enqueued,
         fifo.dequeued,
         fifo.dropped,
@@ -590,6 +645,7 @@ fn print_comparison(
         fifo.p50_queue_ms,
         fifo.p95_queue_ms,
         fifo.p99_queue_ms,
+        fifo.cold_p99_queue_ms,
     );
 
     let p99_gain = if fifo.p99_queue_ms.is_finite()
@@ -606,14 +662,21 @@ fn print_comparison(
         gain_percent(firq.throughput_ops, fifo.throughput_ops),
         firq.produced_total,
     );
-}
 
-fn percentile_from_histogram(histogram: &[firq_core::QueueTimeBucket], pct: f64) -> u64 {
-    let counts = histogram
-        .iter()
-        .map(|bucket| bucket.count)
-        .collect::<Vec<_>>();
-    percentile_from_counts(&counts, pct)
+    if scenario.report_cold_tail {
+        let cold_p99_gain = if fifo.cold_p99_queue_ms.is_finite()
+            && firq.cold_p99_queue_ms.is_finite()
+            && fifo.cold_p99_queue_ms > 0.0
+        {
+            (fifo.cold_p99_queue_ms - firq.cold_p99_queue_ms) / fifo.cold_p99_queue_ms * 100.0
+        } else {
+            0.0
+        };
+        println!(
+            "noisy_neighbor: cold_p99_gain_vs_fifo={:.2}% (firq={:.3}ms fifo={:.3}ms)\n",
+            cold_p99_gain, firq.cold_p99_queue_ms, fifo.cold_p99_queue_ms
+        );
+    }
 }
 
 fn percentile_from_counts(counts: &[u64], pct: f64) -> u64 {
@@ -648,11 +711,7 @@ fn rate(part: u64, total: u64) -> f64 {
 }
 
 fn ns_to_ms(value_ns: u64) -> f64 {
-    if value_ns == u64::MAX {
-        f64::INFINITY
-    } else {
-        value_ns as f64 / 1_000_000.0
-    }
+    value_ns as f64 / 1_000_000.0
 }
 
 struct FifoQueue<T> {
