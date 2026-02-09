@@ -366,6 +366,8 @@ Objetivo de esta etapa:
 4. Cancelación de request en integración Axum/Tower.
 5. Cierre ordenado con workers sync y dispatcher async activos.
 
+Estado: cerrado. El caso 4 quedó validado con `test_abort_before_handler_turn_keeps_second_request_unexecuted` en `crates/firq-tower/tests/integration.rs`.
+
 ### 5.13 Supuestos y defaults elegidos
 1. Alcance objetivo: librería in-process single-node (no cola distribuida/persistente).
 2. Runtime async objetivo: Tokio.

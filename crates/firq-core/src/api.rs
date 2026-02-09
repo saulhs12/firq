@@ -3,9 +3,6 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Clave de fairness (hash estable) usada para shard y DRR.
-///
-/// Nota: se espera que el caller provea un hash estable (por ejemplo, hash de tenant_id).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TenantKey(u64);
 
@@ -43,49 +40,27 @@ impl Priority {
     }
 }
 
-/// Unidad de trabajo encolable.
-///
-/// - `enqueue_ts` se usa para medir queue_time al momento de entregar (now - enqueue_ts).
-/// - `deadline` si existe, y ya pasó al intentar despachar, la tarea se descarta (DropExpired).
-/// - `priority` controla el orden de despacho (High/Normal/Low).
-/// - `cost` se usa por DRR: tareas con mayor costo consumen más presupuesto.
 #[derive(Clone, Debug)]
 pub struct Task<T> {
     pub payload: T,
     pub enqueue_ts: Instant,
     pub deadline: Option<Instant>,
     pub priority: Priority,
-    /// Costo de la tarea para DRR. Debe ser >= 1.
     pub cost: u64,
 }
 
 pub type QuantumProvider = Arc<dyn Fn(TenantKey) -> u64 + Send + Sync>;
 
-/// Configuración del scheduler.
-///
-/// MVP v0.1:
-/// - `backpressure` solo soporta `Reject`.
-/// - `quantum` define el presupuesto base por ronda DRR para todos los tenants.
-/// - `max_global` y `max_per_tenant` imponen límites de memoria (backpressure).
 #[derive(Clone)]
 pub struct SchedulerConfig {
-    /// Número de shards internos para reducir contención (v0.1: estructura preparada).
     pub shards: usize,
-    /// Capacidad máxima global de tareas encoladas.
     pub max_global: usize,
-    /// Capacidad máxima por tenant.
     pub max_per_tenant: usize,
-    /// Quantum base de DRR (presupuesto por ronda).
     pub quantum: u64,
-    /// Quantum por tenant (override estático).
     pub quantum_by_tenant: HashMap<TenantKey, u64>,
-    /// Selector dinámico de quantum por tenant.
     pub quantum_provider: Option<QuantumProvider>,
-    /// Política de backpressure (v0.1: solo Reject).
     pub backpressure: BackpressurePolicy,
-    /// Overrides por tenant para políticas de backpressure.
     pub backpressure_by_tenant: HashMap<TenantKey, BackpressurePolicy>,
-    /// Cantidad máxima de tenants a retener en métricas de top talkers.
     pub top_tenants_capacity: usize,
 }
 
@@ -126,13 +101,9 @@ impl Default for SchedulerConfig {
 
 #[derive(Clone, Debug)]
 pub enum BackpressurePolicy {
-    /// Rechaza el enqueue cuando se excede `max_global` o `max_per_tenant`.
     Reject,
-    /// Descarta el task más antiguo del tenant para hacer lugar al nuevo.
     DropOldestPerTenant,
-    /// Descarta el task más nuevo del tenant para hacer lugar al nuevo.
     DropNewestPerTenant,
-    /// Espera hasta que haya capacidad o expire el timeout.
     Timeout { wait: Duration },
 }
 
@@ -167,11 +138,8 @@ pub enum EnqueueWithHandleResult {
 
 #[derive(Clone, Debug)]
 pub enum EnqueueRejectReason {
-    /// Capacidad global excedida.
     GlobalFull,
-    /// Capacidad por tenant excedida.
     TenantFull,
-    /// Timeout de espera por capacidad.
     Timeout,
 }
 
@@ -189,49 +157,29 @@ pub enum CancelResult {
 
 #[derive(Clone, Debug)]
 pub enum DequeueResult<T> {
-    /// Se entrega una tarea no expirada, seleccionada con fairness DRR por tenant.
     Task { tenant: TenantKey, task: Task<T> },
-    /// No hay trabajo disponible.
     Empty,
-    /// El scheduler fue cerrado y no entregará más trabajo.
     Closed,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct SchedulerStats {
-    /// Total de tareas aceptadas en cola.
     pub enqueued: u64,
-    /// Total de tareas entregadas a consumidores.
     pub dequeued: u64,
-    /// Total de tareas descartadas por expiración (DropExpired en dequeue).
     pub expired: u64,
-    /// Total de tareas rechazadas por backpressure (Reject).
     pub dropped: u64,
-    /// Total de rechazos por capacidad global.
     pub rejected_global: u64,
-    /// Total de rechazos por capacidad por tenant.
     pub rejected_tenant: u64,
-    /// Total de rechazos por timeout.
     pub timeout_rejected: u64,
-    /// Total de descartes por políticas de drop (reemplazo).
     pub dropped_policy: u64,
-    /// Tamaño lógico total de cola (tareas pendientes), mantenido con reserva estricta.
     pub queue_len_estimate: u64,
-    /// Capacidad global configurada.
     pub max_global: u64,
-    /// Saturación de cola: queue_len_estimate / max_global.
     pub queue_saturation_ratio: f64,
-    /// Suma acumulada del queue_time (nanosegundos) de tareas entregadas.
-    /// Se usa para métricas básicas; histogramas/p99 vendrán después.
     pub queue_time_sum_ns: u64,
-    /// Número de muestras acumuladas para `queue_time_sum_ns`.
     pub queue_time_samples: u64,
-    /// Estimaciones de percentiles para queue_time (nanosegundos).
     pub queue_time_p95_ns: u64,
     pub queue_time_p99_ns: u64,
-    /// Histograma básico de queue_time.
     pub queue_time_histogram: Vec<QueueTimeBucket>,
-    /// Top talkers aproximados por tenant.
     pub top_tenants: Vec<TenantCount>,
 }
 

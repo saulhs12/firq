@@ -11,8 +11,6 @@ use firq_core::{
     TenantKey,
 };
 
-// Core-only example: heavy data pipeline with 30 tenants and 4 workers.
-
 #[derive(Clone, Copy, Debug)]
 enum TenantTier {
     Batch,

@@ -78,7 +78,6 @@ impl<T> AsyncScheduler<T> {
 }
 
 impl<T: Send + 'static> AsyncScheduler<T> {
-    /// Espera una tarea sin polling usando la señalización del core.
     pub async fn dequeue_async(&self) -> DequeueResult<T> {
         let scheduler = Arc::clone(&self.inner);
         match tokio::task::spawn_blocking(move || scheduler.dequeue_blocking()).await {

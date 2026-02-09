@@ -1,5 +1,9 @@
 use firq_tower::{Firq, TenantKey};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use tokio::sync::Notify;
 use tower::{Service, ServiceBuilder, ServiceExt};
 
 #[derive(Clone)]
@@ -22,9 +26,49 @@ impl Service<String> for MockService {
     }
 }
 
+#[derive(Clone)]
+struct BlockingService {
+    calls: Arc<AtomicUsize>,
+    first_started: Arc<Notify>,
+    release_first: Arc<Notify>,
+}
+
+#[derive(Clone)]
+struct TestRequest {
+    tenant: u64,
+    payload: &'static str,
+}
+
+impl Service<TestRequest> for BlockingService {
+    type Response = &'static str;
+    type Error = std::io::Error;
+    type Future =
+        Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: TestRequest) -> Self::Future {
+        let calls = Arc::clone(&self.calls);
+        let first_started = Arc::clone(&self.first_started);
+        let release_first = Arc::clone(&self.release_first);
+        Box::pin(async move {
+            let observed = calls.fetch_add(1, Ordering::SeqCst);
+            if observed == 0 {
+                first_started.notify_waiters();
+                release_first.notified().await;
+            }
+            Ok(req.payload)
+        })
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_firq_tower_integration() {
-    // 1. Configurar Scheduler con Builder Pattern (Mucho más limpio)
     let layer = Firq::new()
         .with_shards(1)
         .with_max_global(10)
@@ -33,10 +77,8 @@ async fn test_firq_tower_integration() {
         .build(|req: &String| TenantKey::from(req.len() as u64));
     let scheduler = layer.scheduler().clone();
 
-    // 2. Crear Service con Layer
     let mut service = ServiceBuilder::new().layer(layer).service(MockService);
 
-    // 3. Enviar un request
     let req = "test".to_string();
     let ready = tokio::time::timeout(Duration::from_secs(10), service.ready())
         .await
@@ -49,9 +91,85 @@ async fn test_firq_tower_integration() {
         .unwrap_or_else(|_| panic!("service call timed out, stats={:?}", scheduler.stats()));
     let result: Result<String, _> = result;
 
-    // 4. Verificar resultado
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), "Processed: test");
+
+    scheduler.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_abort_before_handler_turn_keeps_second_request_unexecuted() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let first_started = Arc::new(Notify::new());
+    let release_first = Arc::new(Notify::new());
+
+    let layer = Firq::new()
+        .with_shards(1)
+        .with_max_global(32)
+        .with_max_per_tenant(32)
+        .with_quantum(10)
+        .with_in_flight_limit(1)
+        .build(|req: &TestRequest| TenantKey::from(req.tenant));
+    let scheduler = layer.scheduler().clone();
+
+    let service = ServiceBuilder::new().layer(layer).service(BlockingService {
+        calls: Arc::clone(&calls),
+        first_started: Arc::clone(&first_started),
+        release_first: Arc::clone(&release_first),
+    });
+
+    let mut first_service = service.clone();
+    let first = tokio::spawn(async move {
+        let ready = first_service
+            .ready()
+            .await
+            .expect("first readiness should succeed");
+        ready
+            .call(TestRequest {
+                tenant: 1,
+                payload: "first",
+            })
+            .await
+            .expect("first request should complete")
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), first_started.notified())
+        .await
+        .expect("first handler should start and hold in-flight slot");
+
+    let mut second_service = service.clone();
+    let second = tokio::spawn(async move {
+        let ready = second_service
+            .ready()
+            .await
+            .expect("second readiness should succeed");
+        ready
+            .call(TestRequest {
+                tenant: 1,
+                payload: "second",
+            })
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    second.abort();
+    let aborted = second.await;
+    assert!(
+        aborted.is_err(),
+        "second task should be aborted by client drop"
+    );
+
+    release_first.notify_waiters();
+    let first_payload = tokio::time::timeout(Duration::from_secs(2), first)
+        .await
+        .expect("first join should complete")
+        .expect("first join should succeed");
+    assert_eq!(first_payload, "first");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "second request must not reach handler execution"
+    );
 
     scheduler.close();
 }

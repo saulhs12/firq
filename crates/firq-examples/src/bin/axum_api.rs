@@ -12,8 +12,6 @@ use tower::ServiceBuilder;
 
 #[tokio::main]
 async fn main() {
-    // 1. Configurar Firq usando el Builder (Limpio y simple)
-    // El tipo `Request` se infiere del extractor automáticamente.
     let firq_layer = Firq::new()
         .with_shards(4)
         .with_max_global(1000)
@@ -56,23 +54,19 @@ async fn main() {
                 .unwrap_or(TenantKey::from(0))
         });
 
-    // 2. Obtener referencia al scheduler para métricas (opcional)
     let scheduler = firq_layer.scheduler().clone();
 
-    // 4. Crear la aplicación Axum
     let app = Router::new()
         .route("/", get(root_handler))
         .route("/api/users", get(list_users))
         .route("/api/status", get(status_handler))
         .layer(
             ServiceBuilder::new()
-                // Axum expects fallible layers to be converted into HTTP responses.
                 .layer(HandleErrorLayer::new(handle_firq_error))
                 .layer(firq_layer),
         )
         .with_state(AppState { scheduler });
 
-    // 5. Iniciar el servidor
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
         .unwrap();
@@ -83,19 +77,16 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-// Estado compartido de la aplicación
 #[derive(Clone)]
 struct AppState {
     scheduler: AsyncScheduler<FirqPermit>,
 }
 
-// Handlers de ejemplo
 async fn root_handler() -> &'static str {
     "Hello from Firq-protected API!"
 }
 
 async fn list_users() -> Json<serde_json::Value> {
-    // Simular trabajo
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     Json(json!({
@@ -127,7 +118,6 @@ async fn status_handler(
     })))
 }
 
-// Manejo de errores
 struct AppError(String);
 
 impl IntoResponse for AppError {

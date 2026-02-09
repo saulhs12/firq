@@ -1,11 +1,3 @@
-// Ejemplo simplificado de integración de Firq con Axum
-//
-// Este ejemplo muestra cómo usar Firq para aplicar rate limiting
-// y fairness multi-tenant en una API REST.
-//
-// Para ejecutar: cargo run --bin axum_simple
-// Para probar: curl -H "X-Tenant-ID: 1" http://127.0.0.1:3000/
-
 use axum::{
     Json, Router,
     extract::{Request, State},
@@ -19,7 +11,6 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
-    // 1. Configurar Firq Scheduler
     let config = SchedulerConfig {
         shards: 4,
         max_global: 100,
@@ -34,7 +25,6 @@ async fn main() {
 
     let scheduler = AsyncScheduler::new(Arc::new(Scheduler::new(config)));
 
-    // 2. Crear la aplicación Axum (sin firq-tower, manejamos manualmente)
     let app = Router::new()
         .route("/", get(root_handler))
         .route("/api/users", get(list_users))
@@ -43,7 +33,6 @@ async fn main() {
             scheduler: scheduler.clone(),
         });
 
-    // 3. Iniciar servidor
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
         .unwrap();
@@ -57,23 +46,18 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-// Estado de la aplicación
 #[derive(Clone)]
 struct AppState {
     scheduler: AsyncScheduler<WorkPermit>,
 }
 
-// Estructura para manejar permisos de trabajo
 struct WorkPermit;
 
 async fn root_handler(State(state): State<AppState>, req: Request) -> Result<String, AppError> {
-    // Extraer tenant ID
     let tenant = extract_tenant(&req);
 
-    // Solicitar permiso para procesar
     request_permission(&state.scheduler, tenant).await?;
 
-    // Handler real
     Ok("Hello from Firq-protected API!".to_string())
 }
 
@@ -84,7 +68,6 @@ async fn list_users(
     let tenant = extract_tenant(&req);
     request_permission(&state.scheduler, tenant).await?;
 
-    // Simular trabajo
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     Ok(Json(json!({
@@ -118,8 +101,6 @@ async fn stats_handler(State(state): State<AppState>) -> Json<serde_json::Value>
     }))
 }
 
-// Utilidades
-
 fn extract_tenant(req: &Request) -> TenantKey {
     req.headers()
         .get("X-Tenant-ID")
@@ -143,7 +124,6 @@ async fn request_permission(
         cost: 1,
     };
 
-    // Encolar
     match scheduler.enqueue(tenant, task) {
         EnqueueResult::Enqueued => {}
         EnqueueResult::Rejected(_) => {
@@ -154,7 +134,6 @@ async fn request_permission(
         }
     }
 
-    // Esperar nuestro turno
     match scheduler.dequeue_async().await {
         firq_async::DequeueResult::Task { .. } => Ok(()),
         firq_async::DequeueResult::Closed => Err(AppError::ServiceUnavailable),
@@ -162,7 +141,6 @@ async fn request_permission(
     }
 }
 
-// Error handling
 enum AppError {
     TooManyRequests,
     ServiceUnavailable,
