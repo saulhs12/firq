@@ -3,9 +3,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use firq_core::SchedulerStats;
 pub use firq_core::{
-    BackpressurePolicy, DequeueResult, EnqueueResult, Scheduler, SchedulerConfig, Task, TenantKey,
+    BackpressurePolicy, DequeueResult, EnqueueRejectReason, EnqueueResult, Priority, QueueTimeBucket, Scheduler,
+    SchedulerConfig, SchedulerStats, Task, TenantCount, TenantKey,
 };
 use futures_core::Stream;
 use tokio::sync::Semaphore;
@@ -56,7 +56,7 @@ impl<T> AsyncScheduler<T> {
     }
 }
 
-impl<T: Send + Sync + 'static> AsyncScheduler<T> {
+impl<T: Send + 'static> AsyncScheduler<T> {
     /// Espera una tarea sin polling usando la señalización del core.
     pub async fn dequeue_async(&self) -> DequeueResult<T> {
         let scheduler = Arc::clone(&self.inner);
@@ -83,7 +83,7 @@ impl<T> AsyncReceiver<T> {
     }
 }
 
-impl<T: Send + Sync + 'static> AsyncReceiver<T> {
+impl<T: Send + 'static> AsyncReceiver<T> {
     pub async fn recv(&self) -> Option<DequeueItem<T>> {
         loop {
             match self.scheduler.dequeue_async().await {
@@ -113,7 +113,7 @@ impl<T> AsyncStream<T> {
     }
 }
 
-impl<T: Send + Sync + 'static> Stream for AsyncStream<T> {
+impl<T: Send + 'static> Stream for AsyncStream<T> {
     type Item = DequeueItem<T>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -164,7 +164,7 @@ impl<T> Dispatcher<T> {
     }
 }
 
-impl<T: Send + Sync + 'static> Dispatcher<T> {
+impl<T: Send + 'static> Dispatcher<T> {
     pub async fn run<F, Fut>(&self, handler: F)
     where
         F: Fn(DequeueItem<T>) -> Fut + Send + Sync + 'static,
