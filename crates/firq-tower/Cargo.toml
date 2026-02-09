@@ -4,3 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+firq-core = { path = "../firq-core" }
+firq-async = { path = "../firq-async" }
+tower = { version = "0.4", features = ["util"] }
+tower-service = "0.3"
+futures-core = "0.3"
+tokio = { version = "1", features = ["sync", "rt"] }
+pin-project-lite = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.4", features = ["util"] }
+
+[features]
+default = []
