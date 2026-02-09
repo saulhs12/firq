@@ -2,6 +2,14 @@
 name = "firq-bench"
 version = "0.1.0"
 edition = "2024"
+description = "Benchmark scenarios for Firq vs FIFO under adversarial multi-tenant load"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/saulhs12/firq"
+documentation = "https://github.com/saulhs12/firq/tree/main/crates/firq-bench"
+homepage = "https://github.com/saulhs12/firq"
+readme = "../../README.md"
+keywords = ["benchmark", "scheduler", "fairness", "latency", "queue"]
+categories = ["concurrency", "development-tools::profiling", "algorithms"]
 
 [dependencies]
-firq-core = { path = "../firq-core" }
+firq-core = { path = "../firq-core", version = "0.1.0" }
