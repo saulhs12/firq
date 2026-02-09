@@ -63,11 +63,20 @@ where
 }
 
 /// Layer que aplica rate limiting y fairness usando Firq.
-#[derive(Clone)]
 pub struct FirqLayer<Request, K> {
     scheduler: AsyncScheduler<FirqPermit>,
     extractor: K,
     _marker: PhantomData<Request>,
+}
+
+impl<Request, K: Clone> Clone for FirqLayer<Request, K> {
+    fn clone(&self) -> Self {
+        Self {
+            scheduler: self.scheduler.clone(),
+            extractor: self.extractor.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<Request, K> FirqLayer<Request, K> {
