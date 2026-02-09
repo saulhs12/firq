@@ -2,6 +2,21 @@
 
 This document defines the release flow for crates.io and GitHub.
 
+## Automatic publishing from `main`
+
+Every push to `main` triggers `.github/workflows/ci.yml` and, after quality gates pass,
+the `publish` job attempts to publish crates to crates.io in order:
+
+1. `firq-core`
+2. `firq-async`
+3. `firq-tower`
+
+Behavior:
+
+- If a crate version is already published, the job skips it.
+- Publishing uses retries to tolerate crates.io index propagation delay.
+- The job requires the repository secret `CARGO_REGISTRY_TOKEN`.
+
 ## Preconditions
 
 Run release gates from repository root:

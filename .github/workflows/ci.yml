@@ -40,3 +40,86 @@ jobs:
           else
             echo "Skipping firq-tower dry-run until firq-async is available on crates.io"
           fi
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: rust
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: ensure-jq
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+      - name: validate-token
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN secret is required for crates.io publishing"
+            exit 1
+          fi
+      - name: publish-crates
+        run: |
+          set -euo pipefail
+
+          local_version() {
+            local crate="$1"
+            cargo metadata --no-deps --format-version 1 \
+              | jq -r --arg crate "$crate" '.packages[] | select(.name == $crate) | .version'
+          }
+
+          remote_version() {
+            local crate="$1"
+            curl -fsSL "https://crates.io/api/v1/crates/${crate}" \
+              | jq -r '.crate.max_version // empty' || true
+          }
+
+          publish_once() {
+            local crate="$1"
+            set +e
+            local output
+            output="$(cargo publish -p "$crate" 2>&1)"
+            local status=$?
+            set -e
+            echo "$output"
+            if [ $status -eq 0 ]; then
+              return 0
+            fi
+            if echo "$output" | grep -qi "already uploaded"; then
+              echo "crate ${crate} already uploaded; continuing"
+              return 0
+            fi
+            return $status
+          }
+
+          publish_with_retry() {
+            local crate="$1"
+            local attempts=6
+            local delay_seconds=20
+            for attempt in $(seq 1 "$attempts"); do
+              if publish_once "$crate"; then
+                return 0
+              fi
+              if [ "$attempt" -lt "$attempts" ]; then
+                echo "publish failed for ${crate} (attempt ${attempt}/${attempts}), retrying in ${delay_seconds}s..."
+                sleep "$delay_seconds"
+              fi
+            done
+            echo "::error::failed to publish ${crate} after retries"
+            return 1
+          }
+
+          for crate in firq-core firq-async firq-tower; do
+            local_ver="$(local_version "$crate")"
+            remote_ver="$(remote_version "$crate")"
+            if [ -n "$remote_ver" ] && [ "$remote_ver" = "$local_ver" ]; then
+              echo "${crate} ${local_ver} already on crates.io; skipping"
+              continue
+            fi
+            echo "publishing ${crate} ${local_ver}..."
+            publish_with_retry "$crate"
+          done
