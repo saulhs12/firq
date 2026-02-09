@@ -2,18 +2,24 @@
 name = "firq-tower"
 version = "0.1.0"
 edition = "2024"
+description = "Tower middleware integration for Firq scheduling"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/saulhs12/firq"
+documentation = "https://docs.rs/firq-tower"
+homepage = "https://github.com/saulhs12/firq"
+readme = "../../README.md"
+keywords = ["tower", "axum", "scheduler", "fairness", "middleware"]
+categories = ["web-programming", "asynchronous", "concurrency"]
 
 [dependencies]
-firq-core = { path = "../firq-core" }
-firq-async = { path = "../firq-async" }
+firq-core = { path = "../firq-core", version = "0.1.0" }
+firq-async = { path = "../firq-async", version = "0.1.0" }
 tower = { version = "0.4", features = ["util"] }
 tower-service = "0.3"
-futures-core = "0.3"
 tokio = { version = "1", features = ["sync", "rt"] }
-pin-project-lite = "0.2"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tower = { version = "0.4", features = ["util"] }
 
 [features]

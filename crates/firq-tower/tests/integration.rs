@@ -1,6 +1,6 @@
 use firq_tower::{Firq, TenantKey};
-use tower::{Service, ServiceBuilder};
-use std::task::Poll;
+use std::time::Duration;
+use tower::{Service, ServiceBuilder, ServiceExt};
 
 #[derive(Clone)]
 struct MockService;
@@ -10,7 +10,10 @@ impl Service<String> for MockService {
     type Error = std::io::Error;
     type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
 
-    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
         std::task::Poll::Ready(Ok(()))
     }
 
@@ -31,17 +34,21 @@ async fn test_firq_tower_integration() {
     let scheduler = layer.scheduler().clone();
 
     // 2. Crear Service con Layer
-    let mut service = ServiceBuilder::new()
-        .layer(layer)
-        .service(MockService);
+    let mut service = ServiceBuilder::new().layer(layer).service(MockService);
 
     // 3. Enviar un request
     let req = "test".to_string();
-    // poll_ready required by Tower
-    std::future::poll_fn(|cx| -> Poll<Result<(), std::io::Error>> { service.poll_ready(cx).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)) }).await.unwrap();
-    
-    let result: Result<String, _> = service.call(req).await;
-    
+    let ready = tokio::time::timeout(Duration::from_secs(10), service.ready())
+        .await
+        .expect("service readiness timed out")
+        .map_err(std::io::Error::other)
+        .expect("service readiness failed");
+
+    let result = tokio::time::timeout(Duration::from_secs(10), ready.call(req))
+        .await
+        .unwrap_or_else(|_| panic!("service call timed out, stats={:?}", scheduler.stats()));
+    let result: Result<String, _> = result;
+
     // 4. Verificar resultado
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), "Processed: test");

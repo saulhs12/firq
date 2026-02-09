@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 pub use firq_core::{
-    BackpressurePolicy, DequeueResult, EnqueueRejectReason, EnqueueResult, Priority, QueueTimeBucket, Scheduler,
-    SchedulerConfig, SchedulerStats, Task, TenantCount, TenantKey,
+    BackpressurePolicy, CancelResult, CloseMode, DequeueResult, EnqueueRejectReason, EnqueueResult,
+    EnqueueWithHandleResult, Priority, QueueTimeBucket, Scheduler, SchedulerConfig, SchedulerStats,
+    Task, TaskHandle, TenantCount, TenantKey,
 };
 use futures_core::Stream;
 use tokio::sync::Semaphore;
@@ -35,8 +36,16 @@ impl<T> AsyncScheduler<T> {
         self.inner.enqueue(tenant, task)
     }
 
+    pub fn enqueue_with_handle(&self, tenant: TenantKey, task: Task<T>) -> EnqueueWithHandleResult {
+        self.inner.enqueue_with_handle(tenant, task)
+    }
+
     pub fn try_dequeue(&self) -> DequeueResult<T> {
         self.inner.try_dequeue()
+    }
+
+    pub fn cancel(&self, handle: TaskHandle) -> CancelResult {
+        self.inner.cancel(handle)
     }
 
     pub fn stats(&self) -> SchedulerStats {
@@ -44,7 +53,19 @@ impl<T> AsyncScheduler<T> {
     }
 
     pub fn close(&self) {
-        self.inner.close();
+        self.inner.close_immediate();
+    }
+
+    pub fn close_immediate(&self) {
+        self.inner.close_immediate();
+    }
+
+    pub fn close_drain(&self) {
+        self.inner.close_drain();
+    }
+
+    pub fn close_with_mode(&self, mode: CloseMode) {
+        self.inner.close_with_mode(mode);
     }
 
     pub fn receiver(&self) -> AsyncReceiver<T> {
@@ -192,5 +213,144 @@ impl<T: Send + 'static> Dispatcher<T> {
         }
 
         let _ = self.semaphore.acquire_many(self.max_in_flight as u32).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    fn config() -> SchedulerConfig {
+        SchedulerConfig {
+            shards: 2,
+            max_global: 128,
+            max_per_tenant: 128,
+            quantum: 1,
+            quantum_by_tenant: HashMap::new(),
+            quantum_provider: None,
+            backpressure: BackpressurePolicy::Reject,
+            backpressure_by_tenant: HashMap::new(),
+            top_tenants_capacity: 0,
+        }
+    }
+
+    fn task(payload: u64) -> Task<u64> {
+        Task {
+            payload,
+            enqueue_ts: Instant::now(),
+            deadline: None,
+            priority: Priority::Normal,
+            cost: 1,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_scheduler_enqueue_cancel_roundtrip() {
+        let scheduler = AsyncScheduler::new(Arc::new(Scheduler::new(config())));
+        let tenant = TenantKey::from(1);
+
+        let handle = match scheduler.enqueue_with_handle(tenant, task(1)) {
+            EnqueueWithHandleResult::Enqueued(handle) => handle,
+            other => panic!("expected handle, got {:?}", other),
+        };
+        assert!(matches!(scheduler.cancel(handle), CancelResult::Cancelled));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_receiver_receives_items() {
+        let scheduler = AsyncScheduler::new(Arc::new(Scheduler::new(config())));
+        let tenant = TenantKey::from(42);
+        let _ = scheduler.enqueue(tenant, task(7));
+
+        let item = scheduler.receiver().recv().await.expect("item");
+        assert_eq!(item.tenant, tenant);
+        assert_eq!(item.task.payload, 7);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_stream_yields_items() {
+        let scheduler = AsyncScheduler::new(Arc::new(Scheduler::new(config())));
+        let tenant = TenantKey::from(3);
+        let _ = scheduler.enqueue(tenant, task(11));
+
+        let mut stream = scheduler.stream();
+        let item = stream.next().await.expect("stream item");
+        assert_eq!(item.tenant, tenant);
+        assert_eq!(item.task.payload, 11);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatcher_recovers_permits_after_panic() {
+        let scheduler = AsyncScheduler::new(Arc::new(Scheduler::new(config())));
+        let tenant = TenantKey::from(5);
+        let _ = scheduler.enqueue(tenant, task(1));
+        let _ = scheduler.enqueue(tenant, task(2));
+
+        let dispatcher = Dispatcher::new(scheduler.clone(), 1);
+        let served = Arc::new(AtomicU64::new(0));
+        let served_clone = Arc::clone(&served);
+
+        let runner = tokio::spawn(async move {
+            dispatcher
+                .run(move |item| {
+                    let served = Arc::clone(&served_clone);
+                    async move {
+                        if item.task.payload == 1 {
+                            panic!("simulated panic");
+                        }
+                        served.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+                .await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        scheduler.close();
+        let _ = runner.await;
+
+        assert_eq!(
+            served.load(Ordering::Relaxed),
+            1,
+            "second task should execute despite panic in first task"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "measurement helper for dequeue_async spawn_blocking overhead"]
+    async fn measure_dequeue_async_spawn_blocking_cost() {
+        let mut cfg = config();
+        cfg.max_global = 1_024;
+        cfg.max_per_tenant = 1_024;
+        let scheduler = AsyncScheduler::new(Arc::new(Scheduler::new(cfg)));
+        let tenant = TenantKey::from(9);
+        let samples = 512u64;
+
+        for i in 0..samples {
+            let result = scheduler.enqueue(tenant, task(i));
+            assert!(matches!(result, EnqueueResult::Enqueued));
+        }
+
+        let start = Instant::now();
+        for _ in 0..samples {
+            let result = scheduler.dequeue_async().await;
+            assert!(matches!(result, DequeueResult::Task { .. }));
+        }
+        let elapsed = start.elapsed();
+        let avg = elapsed / samples as u32;
+        println!(
+            "dequeue_async_spawn_blocking: samples={} total_ms={:.3} avg_us={:.3}",
+            samples,
+            elapsed.as_secs_f64() * 1_000.0,
+            duration_to_us(avg)
+        );
+    }
+
+    fn duration_to_us(duration: Duration) -> f64 {
+        duration.as_secs_f64() * 1_000_000.0
     }
 }

@@ -7,11 +7,11 @@
 // Para probar: curl -H "X-Tenant-ID: 1" http://127.0.0.1:3000/
 
 use axum::{
+    Json, Router,
     extract::{Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
 };
 use firq_async::{AsyncScheduler, Scheduler, SchedulerConfig, TenantKey};
 use serde_json::json;
@@ -64,14 +64,9 @@ struct AppState {
 }
 
 // Estructura para manejar permisos de trabajo
-struct WorkPermit {
-    tenant: TenantKey,
-}
+struct WorkPermit;
 
-async fn root_handler(
-    State(state): State<AppState>,
-    req: Request,
-) -> Result<String, AppError> {
+async fn root_handler(State(state): State<AppState>, req: Request) -> Result<String, AppError> {
     // Extraer tenant ID
     let tenant = extract_tenant(&req);
 
@@ -114,7 +109,7 @@ async fn stats_handler(State(state): State<AppState>) -> Json<serde_json::Value>
         } else {
             0
         },
-"p95_queue_time_ms": stats.queue_time_p95_ns / 1_000_000,
+    "p95_queue_time_ms": stats.queue_time_p95_ns / 1_000_000,
         "p99_queue_time_ms": stats.queue_time_p99_ns / 1_000_000,
         "top_tenants": stats.top_tenants.iter().map(|t| json!({
             "tenant_id": t.tenant.as_u64(),
@@ -141,7 +136,7 @@ async fn request_permission(
     use firq_async::{EnqueueResult, Task};
 
     let task = Task {
-        payload: WorkPermit { tenant },
+        payload: WorkPermit,
         enqueue_ts: std::time::Instant::now(),
         deadline: None,
         priority: Default::default(),

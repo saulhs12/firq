@@ -1,10 +1,10 @@
 use axum::{
+    Json, Router,
     error_handling::HandleErrorLayer,
     extract::Request,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
 };
 use firq_tower::{AsyncScheduler, Firq, FirqPermit, TenantKey};
 use serde_json::json;
@@ -19,6 +19,34 @@ async fn main() {
         .with_max_global(1000)
         .with_max_per_tenant(100)
         .with_quantum(10)
+        .with_in_flight_limit(128)
+        .with_deadline_extractor::<Request, _>(|req| {
+            req.headers()
+                .get("X-Deadline-Ms")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms))
+        })
+        .with_rejection_mapper(|reason| match reason {
+            firq_tower::EnqueueRejectReason::TenantFull => firq_tower::FirqHttpRejection {
+                status: 429,
+                code: "tenant_full",
+                message: "tenant queue saturated",
+                reason,
+            },
+            firq_tower::EnqueueRejectReason::GlobalFull => firq_tower::FirqHttpRejection {
+                status: 503,
+                code: "global_full",
+                message: "service queue saturated",
+                reason,
+            },
+            firq_tower::EnqueueRejectReason::Timeout => firq_tower::FirqHttpRejection {
+                status: 503,
+                code: "timeout",
+                message: "request timed out waiting for scheduler",
+                reason,
+            },
+        })
         .build(|req: &Request| {
             req.headers()
                 .get("X-Tenant-ID")
@@ -51,7 +79,7 @@ async fn main() {
 
     println!("🚀 Server running on http://127.0.0.1:3000");
     println!("📊 Try with: curl -H 'X-Tenant-ID: 1' http://127.0.0.1:3000");
-    
+
     axum::serve(listener, app).await.unwrap();
 }
 
@@ -69,7 +97,7 @@ async fn root_handler() -> &'static str {
 async fn list_users() -> Json<serde_json::Value> {
     // Simular trabajo
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-    
+
     Json(json!({
         "users": [
             {"id": 1, "name": "Alice"},
@@ -82,7 +110,7 @@ async fn status_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let stats = state.scheduler.stats();
-    
+
     Ok(Json(json!({
         "enqueued": stats.enqueued,
         "dequeued": stats.dequeued,
@@ -115,7 +143,9 @@ impl IntoResponse for AppError {
 impl From<firq_tower::FirqError<std::convert::Infallible>> for AppError {
     fn from(err: firq_tower::FirqError<std::convert::Infallible>) -> Self {
         match err {
-            firq_tower::FirqError::Rejected(_) => AppError("Too many requests".into()),
+            firq_tower::FirqError::Rejected(rejection) => {
+                AppError(format!("{} ({})", rejection.message, rejection.code))
+            }
             firq_tower::FirqError::Closed => AppError("Service unavailable".into()),
             firq_tower::FirqError::PermitError => AppError("Request expired".into()),
             firq_tower::FirqError::Service(e) => match e {},
