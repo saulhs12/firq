@@ -1,7 +1,7 @@
 use firq_tower::{Firq, TenantKey};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
 use tower::{Service, ServiceBuilder, ServiceExt};
@@ -62,6 +62,37 @@ impl Service<TestRequest> for BlockingService {
                 first_started.notify_waiters();
                 release_first.notified().await;
             }
+            Ok(req.payload)
+        })
+    }
+}
+
+#[derive(Clone)]
+struct OrderedService {
+    starts: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl Service<TestRequest> for OrderedService {
+    type Response = &'static str;
+    type Error = std::io::Error;
+    type Future =
+        Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: TestRequest) -> Self::Future {
+        let starts = Arc::clone(&self.starts);
+        Box::pin(async move {
+            starts
+                .lock()
+                .expect("start-order mutex poisoned")
+                .push(req.payload);
+            tokio::time::sleep(Duration::from_millis(20)).await;
             Ok(req.payload)
         })
     }
@@ -170,6 +201,75 @@ async fn test_abort_before_handler_turn_keeps_second_request_unexecuted() {
         1,
         "second request must not reach handler execution"
     );
+
+    let mut third_service = service.clone();
+    let third_payload = tokio::time::timeout(Duration::from_secs(2), async move {
+        let ready = third_service
+            .ready()
+            .await
+            .expect("third readiness should succeed");
+        ready
+            .call(TestRequest {
+                tenant: 1,
+                payload: "third",
+            })
+            .await
+            .expect("third request should complete")
+    })
+    .await
+    .expect("third request should not deadlock");
+    assert_eq!(third_payload, "third");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "third request should execute after abort frees permit"
+    );
+
+    scheduler.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_start_order_respects_scheduler_under_contention() {
+    let starts = Arc::new(Mutex::new(Vec::new()));
+
+    let layer = Firq::new()
+        .with_shards(1)
+        .with_max_global(32)
+        .with_max_per_tenant(32)
+        .with_quantum(1)
+        .with_in_flight_limit(1)
+        .build(|req: &TestRequest| TenantKey::from(req.tenant));
+    let scheduler = layer.scheduler().clone();
+
+    let mut service = ServiceBuilder::new().layer(layer).service(OrderedService {
+        starts: Arc::clone(&starts),
+    });
+
+    let fut_a1 = service.ready().await.expect("ready a1").call(TestRequest {
+        tenant: 1,
+        payload: "a1",
+    });
+    let fut_a2 = service.ready().await.expect("ready a2").call(TestRequest {
+        tenant: 1,
+        payload: "a2",
+    });
+    let fut_b1 = service.ready().await.expect("ready b1").call(TestRequest {
+        tenant: 2,
+        payload: "b1",
+    });
+    let fut_b2 = service.ready().await.expect("ready b2").call(TestRequest {
+        tenant: 2,
+        payload: "b2",
+    });
+
+    let (r1, r2, r3, r4) = tokio::join!(fut_a1, fut_a2, fut_b1, fut_b2);
+    assert!(r1.is_ok());
+    assert!(r2.is_ok());
+    assert!(r3.is_ok());
+    assert!(r4.is_ok());
+
+    let order = starts.lock().expect("start-order mutex poisoned").clone();
+    assert_eq!(order, vec!["a1", "b1", "a2", "b2"]);
 
     scheduler.close();
 }

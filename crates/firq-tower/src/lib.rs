@@ -22,6 +22,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use tokio::sync::{Semaphore, oneshot};
@@ -72,7 +73,7 @@ pub fn default_rejection_mapper(reason: EnqueueRejectReason) -> FirqHttpRejectio
 
 /// Internal permit payload sent to the background dequeue worker.
 pub struct FirqPermit {
-    tx: oneshot::Sender<()>,
+    tx: oneshot::Sender<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// Layer/service error type.
@@ -165,11 +166,27 @@ impl<Request, K> FirqLayer<Request, K> {
         rejection_mapper: RejectionMapper,
     ) -> Self {
         let worker_scheduler = scheduler.inner().clone();
+        let in_flight = Arc::new(Semaphore::new(in_flight_limit.max(1)));
+        let worker_in_flight = Arc::clone(&in_flight);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
         let worker_handle = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("failed to build tower worker runtime");
             loop {
+                if worker_shutdown.load(Ordering::Acquire) {
+                    break;
+                }
                 match worker_scheduler.dequeue_blocking() {
                     DequeueResult::Task { task, .. } => {
-                        let _ = task.payload.tx.send(());
+                        let permit =
+                            match runtime.block_on(worker_in_flight.clone().acquire_owned()) {
+                                Ok(permit) => permit,
+                                Err(_) => break,
+                            };
+                        let _ = task.payload.tx.send(permit);
                     }
                     DequeueResult::Closed => break,
                     DequeueResult::Empty => {}
@@ -177,12 +194,17 @@ impl<Request, K> FirqLayer<Request, K> {
             }
         });
 
-        let worker = Arc::new(BackgroundWorker::new(scheduler.clone(), worker_handle));
+        let worker = Arc::new(BackgroundWorker::new(
+            scheduler.clone(),
+            Arc::clone(&in_flight),
+            shutdown,
+            worker_handle,
+        ));
 
         Self {
             scheduler,
             extractor,
-            in_flight: Arc::new(Semaphore::new(in_flight_limit.max(1))),
+            in_flight,
             max_in_flight: in_flight_limit.max(1),
             _worker: worker,
             deadline_extractor,
@@ -306,7 +328,6 @@ where
         };
 
         let scheduler = self.scheduler.clone();
-        let in_flight = Arc::clone(&self.in_flight);
         let mapper = Arc::clone(&self.rejection_mapper);
 
         match scheduler.enqueue_with_handle(tenant, task) {
@@ -314,13 +335,9 @@ where
                 let mut inner = self.inner.clone();
                 Box::pin(async move {
                     let mut guard = PendingCancelGuard::new(scheduler.clone(), handle);
-                    rx.await.map_err(|_| FirqError::PermitError)?;
+                    let permit = rx.await.map_err(|_| FirqError::PermitError)?;
                     guard.disarm();
 
-                    let permit = in_flight
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| FirqError::PermitError)?;
                     let response = inner.call(req).await.map_err(FirqError::Service)?;
                     drop(permit);
                     Ok(response)
@@ -363,13 +380,22 @@ impl Drop for PendingCancelGuard {
 
 struct BackgroundWorker {
     scheduler: AsyncScheduler<FirqPermit>,
+    in_flight: Arc<Semaphore>,
+    shutdown: Arc<AtomicBool>,
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl BackgroundWorker {
-    fn new(scheduler: AsyncScheduler<FirqPermit>, handle: std::thread::JoinHandle<()>) -> Self {
+    fn new(
+        scheduler: AsyncScheduler<FirqPermit>,
+        in_flight: Arc<Semaphore>,
+        shutdown: Arc<AtomicBool>,
+        handle: std::thread::JoinHandle<()>,
+    ) -> Self {
         Self {
             scheduler,
+            in_flight,
+            shutdown,
             handle: Mutex::new(Some(handle)),
         }
     }
@@ -377,6 +403,8 @@ impl BackgroundWorker {
 
 impl Drop for BackgroundWorker {
     fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.in_flight.close();
         self.scheduler.close_immediate();
         let mut guard = self.handle.lock().expect("worker mutex poisoned");
         if let Some(handle) = guard.take() {
