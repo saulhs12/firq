@@ -14,6 +14,8 @@ the `publish` job attempts to publish crates to crates.io in order:
 Behavior:
 
 - If a crate version is already published, the job skips it.
+- If crate files changed in the pushed range but the version is unchanged,
+  the job fails and requires a version bump.
 - Publishing uses retries to tolerate crates.io index propagation delay.
 - The job requires the repository secret `CARGO_REGISTRY_TOKEN`.
 
@@ -25,6 +27,10 @@ The workflow creates a GitHub Release that includes direct links for:
 
 - crates.io package page for `firq-core`, `firq-async`, `firq-tower`
 - docs.rs page pinned to each crate version
+
+Before creating the GitHub Release, the workflow verifies that
+`firq-core`, `firq-async`, and `firq-tower` versions in the tag are already
+published on crates.io.
 
 ## Preconditions
 

@@ -19,6 +19,39 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y jq
           fi
+      - name: verify-crates-are-published
+        run: |
+          set -euo pipefail
+
+          CRATES_IO_API="https://crates.io/api/v1/crates"
+          USER_AGENT="firq-release-check (https://github.com/saulhs12/firq)"
+
+          local_version() {
+            local crate="$1"
+            cargo metadata --no-deps --format-version 1 \
+              | jq -r --arg crate "$crate" '.packages[] | select(.name == $crate) | .version'
+          }
+
+          remote_version() {
+            local crate="$1"
+            local body
+            body="$(curl -sSL -H "User-Agent: ${USER_AGENT}" "${CRATES_IO_API}/${crate}" || true)"
+            if [ -z "$body" ]; then
+              echo ""
+              return 0
+            fi
+            echo "$body" | jq -r '.crate.max_version // empty' 2>/dev/null || true
+          }
+
+          for crate in firq-core firq-async firq-tower; do
+            local_ver="$(local_version "$crate")"
+            remote_ver="$(remote_version "$crate")"
+            echo "${crate}: local=${local_ver} remote=${remote_ver:-<unknown>}"
+            if [ -z "$remote_ver" ] || [ "$remote_ver" != "$local_ver" ]; then
+              echo "::error::${crate} ${local_ver} is not published on crates.io (remote=${remote_ver:-<none>}). run publish workflow first."
+              exit 1
+            fi
+          done
       - name: build-release-notes
         run: |
           set -euo pipefail
