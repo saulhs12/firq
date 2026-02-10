@@ -45,14 +45,7 @@ async fn main() {
                 reason,
             },
         })
-        .build(|req: &Request| {
-            req.headers()
-                .get("X-Tenant-ID")
-                .and_then(|h| h.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(TenantKey::from)
-                .unwrap_or(TenantKey::from(0))
-        });
+        .build(|req: &Request| tenant_from_request(req));
 
     let scheduler = firq_layer.scheduler().clone();
 
@@ -72,7 +65,9 @@ async fn main() {
         .unwrap();
 
     println!("Server running on http://127.0.0.1:3000");
-    println!("Try with: curl -H 'X-Tenant-ID: 1' http://127.0.0.1:3000");
+    println!("Try with:");
+    println!("  curl -H 'X-Tenant-ID: 1' http://127.0.0.1:3000");
+    println!("  curl -H 'Authorization: Bearer tenant:2' http://127.0.0.1:3000");
 
     axum::serve(listener, app).await.unwrap();
 }
@@ -147,4 +142,34 @@ async fn handle_firq_error(
     err: firq_tower::FirqError<std::convert::Infallible>,
 ) -> impl IntoResponse {
     AppError::from(err)
+}
+
+fn tenant_from_request(req: &Request) -> TenantKey {
+    if let Some(tenant) = req
+        .headers()
+        .get("X-Tenant-ID")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        return TenantKey::from(tenant);
+    }
+
+    if let Some(tenant) = req
+        .headers()
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(parse_simulated_claim)
+    {
+        return TenantKey::from(tenant);
+    }
+
+    TenantKey::from(0)
+}
+
+fn parse_simulated_claim(auth_header: &str) -> Option<u64> {
+    let token = auth_header.strip_prefix("Bearer ")?;
+    let claim = token
+        .strip_prefix("tenant:")
+        .or_else(|| token.strip_prefix("tid:"))?;
+    claim.parse::<u64>().ok()
 }
