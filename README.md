@@ -49,7 +49,14 @@ Optional metrics helpers (`firq_core::prometheus`) are behind feature `metrics` 
 
 ```toml
 [dependencies]
-firq-core = { version = "0.1.3", default-features = false, features = ["metrics"] }
+firq-core = "0.1.3"
+```
+
+Disable metrics helpers if you only need scheduling primitives:
+
+```toml
+[dependencies]
+firq-core = { version = "0.1.3", default-features = false }
 ```
 
 ### From source
@@ -79,12 +86,12 @@ cargo run -p firq-examples --bin async_worker
 - For production, pin a concrete release (`=0.1.3`) or a conservative range (`~0.1.3`) and review `CHANGELOG.md` before upgrades.
 - MSRV: Rust `1.85+` (`rust-version = "1.85"` in `firq-core`, `firq-async`, and `firq-tower`).
 
-## Getting started on docs.rs
+## Docs & examples
 
-- `firq-core`: https://docs.rs/firq-core and `cargo add firq-core@0.1.3`
-- `firq-async`: https://docs.rs/firq-async and `cargo add firq-async@0.1.3`
-- `firq-tower`: https://docs.rs/firq-tower and `cargo add firq-tower@0.1.3`
-- Minimal, copyable examples are included in each crate-level `lib.rs` docs.
+- [`firq-core`](https://docs.rs/firq-core): core scheduler API and crate-level minimal example. `cargo add firq-core@0.1.3`
+- [`firq-async`](https://docs.rs/firq-async): Tokio adapter and worker-backed consumer example. `cargo add firq-async@0.1.3`
+- [`firq-tower`](https://docs.rs/firq-tower): Tower/Axum layer with header-based tenant extraction. `cargo add firq-tower@0.1.3`
+- All three crates include copyable crate-level examples in `lib.rs` docs.
 
 ## Scheduler guarantees and non-guarantees
 
@@ -94,12 +101,38 @@ Guarantees:
 - Queue limits (`max_global`, `max_per_tenant`) bound live pending work.
 - Cancellation and deadline expiry are reclaimed lazily and should not permanently consume capacity.
 - `stats()` counters are monotonic snapshots suitable for alerting and regression checks.
+- Fairness is cost-weighted: each dequeue charges `task.cost` against tenant deficit, refilled by `quantum`.
+- Priority is strict (`High` -> `Normal` -> `Low`) in dispatch order, so sustained `High` traffic can delay lower-priority work.
 
 Non-guarantees:
 
 - No strict global FIFO ordering across tenants.
 - No cross-process fairness guarantee (scheduler is per-process/in-memory).
 - No hard latency SLA by itself; tune `quantum`, `cost`, capacity, and worker parallelism with production traffic.
+
+## When to use / not use
+
+Use Firq when:
+
+- You need in-process multi-tenant fairness and backpressure in a Rust service.
+- You want deadline-aware admission/dispatch and explicit queue saturation signals.
+- You are integrating with sync workers, Tokio, or Tower/Axum middleware.
+
+Do not use Firq when:
+
+- You need durable or distributed queue semantics.
+- You need fairness across multiple processes/nodes by itself.
+- You need persistent job orchestration/retries as the primary concern.
+
+## Scheduling flow
+
+```text
+producers -> enqueue(tenant, priority, cost, deadline)
+          -> sharded per-tenant priority queues
+          -> DRR selection (cost vs quantum)
+          -> dequeue
+          -> worker pool / async consumer / tower layer
+```
 
 ## How to choose parameters
 
@@ -117,6 +150,12 @@ Use these as starting points, then tune with real traffic and `stats()` metrics.
   `Reject` for strict admission control, `DropOldestPerTenant`/`DropNewestPerTenant` for lossy workloads, `Timeout` when producers can wait briefly for capacity.
 
 Queue limits are enforced against live pending work. Cancelled/expired entries are compacted lazily on dequeue and enqueue maintenance passes.
+
+Starting profiles (adjust with production traffic):
+
+- Public API: `Reject` or short `Timeout` (5-20ms), conservative `max_per_tenant`, `in_flight_limit` near available CPU parallelism.
+- Internal RPC/workers: `Reject` with moderate `max_per_tenant`, calibrate `cost` for heavy endpoints, increase `quantum` if heavy tasks starve.
+- Lossy telemetry/batch edge: `DropOldestPerTenant` or `DropNewestPerTenant` based on whether freshness or completeness matters more.
 
 ## Core usage (`firq-core`)
 
