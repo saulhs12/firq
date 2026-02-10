@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -144,6 +144,139 @@ fn fairness_allows_cold_tenant_to_progress() {
     }
 
     assert!(saw_cold, "cold tenant should make progress under DRR");
+}
+
+#[test]
+fn deterministic_hot_vs_many_cold_no_starvation() {
+    let scheduler = Scheduler::new(config(2_000, 2_000));
+    let hot = TenantKey::from(1);
+    let cold_tenants = (2u64..=33).map(TenantKey::from).collect::<Vec<_>>();
+
+    for payload in 0..400 {
+        let _ = scheduler.enqueue(hot, task(payload, None));
+    }
+    for (idx, tenant) in cold_tenants.iter().enumerate() {
+        let result = scheduler.enqueue(*tenant, task(10_000 + idx as u64, None));
+        assert!(matches!(result, EnqueueResult::Enqueued));
+    }
+
+    let mut seen_cold = HashSet::new();
+    for _ in 0..256 {
+        let (tenant, _) = dequeue_task(&scheduler, 3).expect("dequeue should make progress");
+        if tenant != hot {
+            seen_cold.insert(tenant);
+        }
+        if seen_cold.len() == cold_tenants.len() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        seen_cold.len(),
+        cold_tenants.len(),
+        "all cold tenants should get at least one turn under sustained hot traffic"
+    );
+}
+
+#[test]
+fn deadline_expiration_pressure_still_serves_live_work() {
+    let scheduler = Scheduler::new(config(512, 512));
+    let expired_tenant = TenantKey::from(8);
+    let live_tenant = TenantKey::from(9);
+    let expired_deadline = Instant::now() - Duration::from_millis(1);
+
+    for payload in 0..120 {
+        let _ = scheduler.enqueue(expired_tenant, task(payload, Some(expired_deadline)));
+    }
+    for payload in 0..24 {
+        let _ = scheduler.enqueue(live_tenant, task(1_000 + payload, None));
+    }
+
+    let mut live_dequeued = 0u64;
+    for _ in 0..256 {
+        if let Some((tenant, _)) = dequeue_task(&scheduler, 4)
+            && tenant == live_tenant
+        {
+            live_dequeued += 1;
+        }
+    }
+
+    let stats = scheduler.stats();
+    assert_eq!(live_dequeued, 24, "live tasks must still be processed");
+    assert_eq!(
+        stats.expired, 120,
+        "expired backlog should be reclaimed under dequeue pressure"
+    );
+    assert_eq!(stats.dequeued, 24);
+    assert_eq!(stats.queue_len_estimate, 0);
+}
+
+#[test]
+fn capacity_pressure_respects_limits_and_recovers() {
+    let max_global = 32usize;
+    let max_per_tenant = 4usize;
+    let scheduler = Scheduler::new(config(max_global, max_per_tenant));
+    let tenants = (1u64..=8).map(TenantKey::from).collect::<Vec<_>>();
+
+    for tenant in &tenants {
+        for payload in 0..max_per_tenant as u64 {
+            let result = scheduler.enqueue(*tenant, task(payload, None));
+            assert!(matches!(result, EnqueueResult::Enqueued));
+        }
+    }
+
+    let stats_full = scheduler.stats();
+    assert_eq!(stats_full.queue_len_estimate, max_global as u64);
+
+    for tenant in &tenants {
+        let result = scheduler.enqueue(*tenant, task(99_000 + tenant.as_u64(), None));
+        assert!(matches!(
+            result,
+            EnqueueResult::Rejected(EnqueueRejectReason::TenantFull)
+        ));
+    }
+
+    let overflow_tenant = TenantKey::from(9_999);
+    let overflow = scheduler.enqueue(overflow_tenant, task(123_456, None));
+    assert!(matches!(
+        overflow,
+        EnqueueResult::Rejected(EnqueueRejectReason::GlobalFull)
+    ));
+
+    let stats_after_rejects = scheduler.stats();
+    assert_eq!(stats_after_rejects.queue_len_estimate, max_global as u64);
+    assert!(
+        stats_after_rejects.rejected_tenant >= tenants.len() as u64,
+        "tenant-full rejections should be accounted"
+    );
+    assert!(
+        stats_after_rejects.rejected_global >= 1,
+        "global-full rejections should be accounted"
+    );
+
+    for _ in 0..8 {
+        assert!(
+            dequeue_task(&scheduler, 3).is_some(),
+            "dequeue should free capacity"
+        );
+    }
+
+    let stats_after_dequeue = scheduler.stats();
+    assert_eq!(
+        stats_after_dequeue.queue_len_estimate,
+        (max_global - 8) as u64
+    );
+
+    for idx in 0..8 {
+        let tenant = tenants[idx % tenants.len()];
+        let result = scheduler.enqueue(tenant, task(100_000 + idx as u64, None));
+        assert!(matches!(
+            result,
+            EnqueueResult::Enqueued | EnqueueResult::Rejected(EnqueueRejectReason::TenantFull)
+        ));
+    }
+
+    assert!(scheduler.stats().queue_len_estimate <= max_global as u64);
 }
 
 #[test]
