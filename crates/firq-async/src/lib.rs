@@ -3,12 +3,16 @@
 //! This crate provides async wrappers around the core scheduler, including:
 //! - `AsyncScheduler` for enqueue/dequeue operations
 //! - `AsyncReceiver` and `AsyncStream` helpers
+//! - `AsyncWorkerReceiver` for dedicated dequeue-worker mode
 //! - `Dispatcher` with bounded in-flight execution
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::thread;
+use std::time::Duration;
 
 pub use firq_core::{
     BackpressurePolicy, CancelResult, CloseMode, DequeueResult, EnqueueRejectReason, EnqueueResult,
@@ -16,7 +20,9 @@ pub use firq_core::{
     Task, TaskHandle, TenantCount, TenantKey,
 };
 use futures_core::Stream;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, mpsc};
+
+const WORKER_DEQUEUE_TIMEOUT: Duration = Duration::from_millis(25);
 
 /// Async wrapper around [`Scheduler`].
 pub struct AsyncScheduler<T> {
@@ -107,6 +113,16 @@ impl<T: Send + 'static> AsyncScheduler<T> {
             Err(_) => DequeueResult::Closed,
         }
     }
+
+    /// Returns a receiver powered by a dedicated dequeue worker thread.
+    pub fn receiver_with_worker(&self, buffer: usize) -> AsyncWorkerReceiver<T> {
+        AsyncWorkerReceiver::new(self.clone(), buffer)
+    }
+
+    /// Returns a stream powered by a dedicated dequeue worker thread.
+    pub fn stream_with_worker(&self, buffer: usize) -> AsyncWorkerReceiver<T> {
+        self.receiver_with_worker(buffer)
+    }
 }
 
 /// Dequeued tenant/task pair.
@@ -144,6 +160,90 @@ impl<T: Send + 'static> AsyncReceiver<T> {
                 }
             }
         }
+    }
+
+    /// Creates a receiver powered by a dedicated dequeue worker thread.
+    pub fn new_worker(scheduler: AsyncScheduler<T>, buffer: usize) -> AsyncWorkerReceiver<T> {
+        AsyncWorkerReceiver::new(scheduler, buffer)
+    }
+}
+
+struct WorkerThreadHandle {
+    shutdown: Arc<AtomicBool>,
+    handle: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl WorkerThreadHandle {
+    fn new(shutdown: Arc<AtomicBool>, handle: thread::JoinHandle<()>) -> Self {
+        Self {
+            shutdown,
+            handle: Mutex::new(Some(handle)),
+        }
+    }
+}
+
+impl Drop for WorkerThreadHandle {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        let mut guard = self.handle.lock().expect("worker handle mutex poisoned");
+        if let Some(handle) = guard.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Receiver/stream adapter backed by a dedicated dequeue worker thread.
+pub struct AsyncWorkerReceiver<T> {
+    rx: mpsc::Receiver<DequeueItem<T>>,
+    _worker: WorkerThreadHandle,
+}
+
+impl<T: Send + 'static> AsyncWorkerReceiver<T> {
+    /// Creates a new worker-backed receiver.
+    pub fn new(scheduler: AsyncScheduler<T>, buffer: usize) -> Self {
+        let buffer = buffer.max(1);
+        let (tx, rx) = mpsc::channel(buffer);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
+        let core = Arc::clone(scheduler.inner());
+
+        let handle = thread::spawn(move || {
+            while !worker_shutdown.load(Ordering::Acquire) {
+                match core.dequeue_blocking_timeout(WORKER_DEQUEUE_TIMEOUT) {
+                    DequeueResult::Task { tenant, task } => {
+                        if tx.blocking_send(DequeueItem { tenant, task }).is_err() {
+                            break;
+                        }
+                    }
+                    DequeueResult::Closed => break,
+                    DequeueResult::Empty => {}
+                }
+            }
+        });
+
+        Self {
+            rx,
+            _worker: WorkerThreadHandle::new(shutdown, handle),
+        }
+    }
+
+    /// Waits for the next task, returning `None` once the worker stops.
+    pub async fn recv(&mut self) -> Option<DequeueItem<T>> {
+        self.rx.recv().await
+    }
+}
+
+impl<T> Drop for AsyncWorkerReceiver<T> {
+    fn drop(&mut self) {
+        self.rx.close();
+    }
+}
+
+impl<T> Stream for AsyncWorkerReceiver<T> {
+    type Item = DequeueItem<T>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().rx.poll_recv(cx)
     }
 }
 
@@ -313,6 +413,65 @@ mod tests {
         let item = stream.next().await.expect("stream item");
         assert_eq!(item.tenant, tenant);
         assert_eq!(item.task.payload, 11);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_worker_receiver_receives_items() {
+        let scheduler = AsyncScheduler::new(Arc::new(Scheduler::new(config())));
+        let tenant = TenantKey::from(6);
+        let _ = scheduler.enqueue(tenant, task(12));
+
+        let mut receiver = scheduler.receiver_with_worker(16);
+        let item = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("worker recv timed out")
+            .expect("worker recv should yield item");
+        assert_eq!(item.tenant, tenant);
+        assert_eq!(item.task.payload, 12);
+
+        scheduler.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_worker_receiver_observes_basic_fair_order() {
+        let mut cfg = config();
+        cfg.shards = 1;
+        cfg.quantum = 1;
+        let scheduler = AsyncScheduler::new(Arc::new(Scheduler::new(cfg)));
+
+        let tenant_a = TenantKey::from(1);
+        let tenant_b = TenantKey::from(2);
+        let _ = scheduler.enqueue(tenant_a, task(1));
+        let _ = scheduler.enqueue(tenant_a, task(2));
+        let _ = scheduler.enqueue(tenant_b, task(3));
+        let _ = scheduler.enqueue(tenant_b, task(4));
+
+        let mut receiver = scheduler.receiver_with_worker(16);
+        let mut observed = Vec::new();
+        for _ in 0..4 {
+            let item = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("worker recv timed out")
+                .expect("expected dequeued item");
+            observed.push((item.tenant.as_u64(), item.task.payload));
+        }
+
+        assert_eq!(observed, vec![(1, 1), (2, 3), (1, 2), (2, 4)]);
+        scheduler.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_worker_receiver_drop_stops_worker() {
+        let scheduler = AsyncScheduler::new(Arc::new(Scheduler::<u64>::new(config())));
+
+        let start = Instant::now();
+        {
+            let _receiver = scheduler.receiver_with_worker(8);
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "worker drop should join promptly"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
