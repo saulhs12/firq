@@ -1,6 +1,6 @@
 [package]
 name = "firq-tower"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Tower middleware integration for Firq scheduling"
@@ -13,8 +13,8 @@ keywords = ["tower", "axum", "scheduler", "fairness", "middleware"]
 categories = ["web-programming", "asynchronous", "concurrency"]
 
 [dependencies]
-firq-core = { path = "../firq-core", version = "0.1.0" }
-firq-async = { path = "../firq-async", version = "0.1.0" }
+firq-core = { path = "../firq-core", version = "0.1.1" }
+firq-async = { path = "../firq-async", version = "0.1.1" }
 tower = { version = "0.4", features = ["util"] }
 tower-service = "0.3"
 tokio = { version = "1", features = ["sync", "rt"] }

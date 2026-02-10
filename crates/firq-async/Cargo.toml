@@ -1,6 +1,6 @@
 [package]
 name = "firq-async"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Tokio async adapter for firq-core"
@@ -13,7 +13,7 @@ keywords = ["scheduler", "tokio", "fairness", "backpressure", "queue"]
 categories = ["asynchronous", "concurrency", "network-programming"]
 
 [dependencies]
-firq-core = { path = "../firq-core", version = "0.1.0" }
+firq-core = { path = "../firq-core", version = "0.1.1" }
 futures-core = "0.3"
 tokio = { version = "1", features = ["rt", "sync"] }
 
