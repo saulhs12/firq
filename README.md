@@ -79,6 +79,21 @@ cargo run -p firq-examples --bin async_worker
 - `firq-tower`: https://docs.rs/firq-tower and `cargo add firq-tower@0.1.2`
 - Minimal, copyable examples are included in each crate-level `lib.rs` docs.
 
+## Scheduler guarantees and non-guarantees
+
+Guarantees:
+
+- DRR scheduling gives active tenants recurring turns (no permanent starvation for runnable tenants).
+- Queue limits (`max_global`, `max_per_tenant`) bound live pending work.
+- Cancellation and deadline expiry are reclaimed lazily and should not permanently consume capacity.
+- `stats()` counters are monotonic snapshots suitable for alerting and regression checks.
+
+Non-guarantees:
+
+- No strict global FIFO ordering across tenants.
+- No cross-process fairness guarantee (scheduler is per-process/in-memory).
+- No hard latency SLA by itself; tune `quantum`, `cost`, capacity, and worker parallelism with production traffic.
+
 ## How to choose parameters
 
 Use these as starting points, then tune with real traffic and `stats()` metrics.
