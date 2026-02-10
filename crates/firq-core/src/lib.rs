@@ -8,6 +8,7 @@
 //! - Global/per-tenant backpressure policies
 //! - Deadline-aware dequeue semantics
 //! - Queue-time metrics and saturation signals
+//! - Prometheus text rendering helpers (`metrics` feature, enabled by default)
 //! - Pending task cancellation and shutdown modes
 //!
 //! # Basic usage
@@ -34,6 +35,7 @@
 //! ```
 
 mod api;
+#[cfg(feature = "metrics")]
 pub mod prometheus;
 mod scheduler;
 mod state;

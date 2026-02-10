@@ -45,6 +45,13 @@ firq-async = "0.1.2"
 firq-tower = "0.1.2"
 ```
 
+Optional metrics helpers (`firq_core::prometheus`) are behind feature `metrics` (enabled by default):
+
+```toml
+[dependencies]
+firq-core = { version = "0.1.2", default-features = false, features = ["metrics"] }
+```
+
 ### From source
 
 ```bash

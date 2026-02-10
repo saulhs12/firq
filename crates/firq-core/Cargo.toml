@@ -12,6 +12,10 @@ readme = "../../README.md"
 keywords = ["scheduler", "fairness", "multi-tenant", "backpressure", "queue"]
 categories = ["concurrency", "algorithms", "asynchronous"]
 
+[features]
+default = ["metrics"]
+metrics = []
+
 [dependencies]
 parking_lot = "0.12"
 
