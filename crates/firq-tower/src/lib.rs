@@ -11,6 +11,7 @@
 //!
 //! ```rust,no_run
 //! use firq_tower::{Firq, TenantKey};
+//! use std::collections::HashMap;
 //! use std::convert::Infallible;
 //! use std::future::Ready;
 //! use std::task::{Context, Poll};
@@ -18,15 +19,15 @@
 //!
 //! #[derive(Clone)]
 //! struct Request {
-//!     x_tenant_id_header: Option<String>,
-//!     body: String,
+//!     headers: HashMap<&'static str, &'static str>,
+//!     body: &'static str,
 //! }
 //!
 //! #[derive(Clone)]
 //! struct EchoService;
 //!
 //! impl Service<Request> for EchoService {
-//!     type Response = String;
+//!     type Response = &'static str;
 //!     type Error = Infallible;
 //!     type Future = Ready<Result<Self::Response, Self::Error>>;
 //!     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -38,8 +39,8 @@
 //! }
 //!
 //! let layer = Firq::new().build(|req: &Request| {
-//!     req.x_tenant_id_header
-//!         .as_deref()
+//!     req.headers
+//!         .get("x-tenant-id")
 //!         .and_then(|raw| raw.parse::<u64>().ok())
 //!         .map(TenantKey::from)
 //!         .unwrap_or(TenantKey::from(0))

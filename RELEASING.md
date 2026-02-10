@@ -61,7 +61,7 @@ Before publishing:
 
 1. Update `CHANGELOG.md` under `Unreleased`.
 2. Commit release changes.
-3. Create a Git tag for the release (for example `v0.1.2`).
+3. Create a Git tag for the release (for example `v0.1.3`).
 
 ## Dry runs
 

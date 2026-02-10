@@ -148,7 +148,31 @@ impl ConcurrentHistogram {
 
 fn main() {
     let config = BenchConfig::default();
-    let scenarios = scenarios();
+    let mut scenarios = scenarios();
+    let available = scenarios
+        .iter()
+        .map(|scenario| scenario.name)
+        .collect::<Vec<_>>();
+
+    if let Ok(name) = std::env::var("FIRQ_BENCH_SCENARIO") {
+        scenarios.retain(|scenario| scenario.name == name);
+        if scenarios.is_empty() {
+            eprintln!(
+                "unknown scenario '{name}'. available: {}",
+                available.join(", ")
+            );
+            std::process::exit(2);
+        }
+    }
+
+    if let Ok(raw_seconds) = std::env::var("FIRQ_BENCH_SECONDS")
+        && let Ok(seconds) = raw_seconds.parse::<u64>()
+    {
+        let seconds = seconds.max(1);
+        for scenario in &mut scenarios {
+            scenario.run_seconds = Some(seconds);
+        }
+    }
 
     for scenario in scenarios {
         let firq = run_firq(&config, &scenario);

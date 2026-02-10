@@ -356,7 +356,10 @@ async fn test_concurrency_and_cancellation_no_deadlock_or_permit_leak() {
     }
 
     assert!(completed > 0, "at least one request should complete");
-    assert!(aborted > 0, "at least one request should be client-cancelled");
+    assert!(
+        aborted > 0,
+        "at least one request should be client-cancelled"
+    );
     assert!(
         max_active.load(Ordering::SeqCst) <= in_flight_limit,
         "handler concurrency must stay under in-flight limit"

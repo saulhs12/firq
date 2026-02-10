@@ -8,7 +8,28 @@ The format follows Keep a Changelog principles and this project follows SemVer.
 
 No unreleased changes yet.
 
+## [0.1.3] - 2026-02-10
+
+### Added
+
+- `firq-core`: deterministic stress tests for fairness under hot/cold tenant contention, deadline expiration pressure, and capacity saturation recovery.
+- `firq-tower`: end-to-end integration test covering concurrent multi-tenant requests, client cancellations, and permit/deadlock safety checks.
+- `firq-core`: explicit `metrics` feature flag (enabled by default) gating `firq_core::prometheus`.
+
+### Changed
+
+- `firq-bench`: reproducible environment overrides for quick scenario-specific runs (`FIRQ_BENCH_SCENARIO`, `FIRQ_BENCH_SECONDS`).
+- Rustdoc examples refined for docs.rs onboarding (`firq-async` worker-backed recommended flow and `firq-tower` header-based tenant extraction).
+- README expanded with scheduler guarantees/non-guarantees, SemVer/MSRV guidance, and benchmark run expectations.
+- Publishable crate versions and internal dependency links aligned to `0.1.3`.
+
 ## [0.1.2] - 2026-02-10
+
+### Changed
+
+- Metadata-only release that aligned crate/docs version references from `0.1.1` to `0.1.2` (no scheduler runtime behavior changes).
+
+## [0.1.1] - 2026-02-10
 
 ### Added
 

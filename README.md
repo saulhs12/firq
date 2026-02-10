@@ -25,31 +25,31 @@ Key capabilities:
 
 ```toml
 [dependencies]
-firq-core = "0.1.2"
+firq-core = "0.1.3"
 ```
 
 Tokio integration:
 
 ```toml
 [dependencies]
-firq-core = "0.1.2"
-firq-async = "0.1.2"
+firq-core = "0.1.3"
+firq-async = "0.1.3"
 ```
 
 Tower/Axum integration:
 
 ```toml
 [dependencies]
-firq-core = "0.1.2"
-firq-async = "0.1.2"
-firq-tower = "0.1.2"
+firq-core = "0.1.3"
+firq-async = "0.1.3"
+firq-tower = "0.1.3"
 ```
 
 Optional metrics helpers (`firq_core::prometheus`) are behind feature `metrics` (enabled by default):
 
 ```toml
 [dependencies]
-firq-core = { version = "0.1.2", default-features = false, features = ["metrics"] }
+firq-core = { version = "0.1.3", default-features = false, features = ["metrics"] }
 ```
 
 ### From source
@@ -76,14 +76,14 @@ cargo run -p firq-examples --bin async_worker
 - Firq is currently in `0.x`; minor releases may include API-breaking changes.
 - Breaking changes include removing/renaming public types/functions, changing enum variants, or changing behavior in a way that requires code changes.
 - Patch releases (`0.1.z`) aim to be backward compatible and focus on fixes/hardening.
-- For production, pin a concrete release (`=0.1.2`) or a conservative range (`~0.1.2`) and review `CHANGELOG.md` before upgrades.
+- For production, pin a concrete release (`=0.1.3`) or a conservative range (`~0.1.3`) and review `CHANGELOG.md` before upgrades.
 - MSRV: Rust `1.85+` (`rust-version = "1.85"` in `firq-core`, `firq-async`, and `firq-tower`).
 
 ## Getting started on docs.rs
 
-- `firq-core`: https://docs.rs/firq-core and `cargo add firq-core@0.1.2`
-- `firq-async`: https://docs.rs/firq-async and `cargo add firq-async@0.1.2`
-- `firq-tower`: https://docs.rs/firq-tower and `cargo add firq-tower@0.1.2`
+- `firq-core`: https://docs.rs/firq-core and `cargo add firq-core@0.1.3`
+- `firq-async`: https://docs.rs/firq-async and `cargo add firq-async@0.1.3`
+- `firq-tower`: https://docs.rs/firq-tower and `cargo add firq-tower@0.1.3`
 - Minimal, copyable examples are included in each crate-level `lib.rs` docs.
 
 ## Scheduler guarantees and non-guarantees
@@ -329,18 +329,18 @@ Run reproducible scenarios:
 cargo run --release -p firq-bench
 ```
 
-Quick smoke run (same binary, full scenario set):
+Quick smoke run (single scenario, short duration):
 
 ```bash
-cargo build --release -p firq-bench
-./target/release/firq-bench
+FIRQ_BENCH_SCENARIO=capacity_pressure FIRQ_BENCH_SECONDS=2 \
+  cargo run --release -p firq-bench
 ```
 
-Scenarios in the benchmark binary include:
+No extra features are required for benchmark runs.
+
+Scenarios in the benchmark binary include (real names):
 
 - `hot_tenant_sustained`
-- `burst_massive`
-- `mixed_priorities`
 - `deadline_expiration`
 - `capacity_pressure`
 
