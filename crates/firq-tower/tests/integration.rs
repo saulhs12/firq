@@ -98,6 +98,64 @@ impl Service<TestRequest> for OrderedService {
     }
 }
 
+#[derive(Clone)]
+struct TrackingService {
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+    executed: Arc<AtomicUsize>,
+}
+
+impl Service<TestRequest> for TrackingService {
+    type Response = &'static str;
+    type Error = std::io::Error;
+    type Future =
+        Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: TestRequest) -> Self::Future {
+        struct ActiveGuard {
+            active: Arc<AtomicUsize>,
+        }
+        impl Drop for ActiveGuard {
+            fn drop(&mut self) {
+                self.active.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        let active = Arc::clone(&self.active);
+        let max_active = Arc::clone(&self.max_active);
+        let executed = Arc::clone(&self.executed);
+        Box::pin(async move {
+            let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+            let _guard = ActiveGuard {
+                active: Arc::clone(&active),
+            };
+            let mut seen_max = max_active.load(Ordering::SeqCst);
+            while now_active > seen_max {
+                match max_active.compare_exchange(
+                    seen_max,
+                    now_active,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => seen_max = actual,
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            executed.fetch_add(1, Ordering::SeqCst);
+            Ok(req.payload)
+        })
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_firq_tower_integration() {
     let layer = Firq::new()
@@ -226,6 +284,104 @@ async fn test_abort_before_handler_turn_keeps_second_request_unexecuted() {
     );
 
     scheduler.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrency_and_cancellation_no_deadlock_or_permit_leak() {
+    let in_flight_limit = 3usize;
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let executed = Arc::new(AtomicUsize::new(0));
+
+    let layer = Firq::new()
+        .with_shards(2)
+        .with_max_global(128)
+        .with_max_per_tenant(64)
+        .with_quantum(1)
+        .with_in_flight_limit(in_flight_limit)
+        .build(|req: &TestRequest| TenantKey::from(req.tenant));
+    let scheduler = layer.scheduler().clone();
+    let inspector = layer.clone();
+
+    let service = ServiceBuilder::new().layer(layer).service(TrackingService {
+        active: Arc::clone(&active),
+        max_active: Arc::clone(&max_active),
+        executed: Arc::clone(&executed),
+    });
+
+    let total_requests = 48usize;
+    let mut handles = Vec::with_capacity(total_requests);
+    for idx in 0..total_requests {
+        let mut svc = service.clone();
+        handles.push(tokio::spawn(async move {
+            let ready = tokio::time::timeout(Duration::from_secs(2), svc.ready())
+                .await
+                .expect("readiness timeout")
+                .expect("service should become ready");
+            tokio::time::timeout(
+                Duration::from_secs(4),
+                ready.call(TestRequest {
+                    tenant: (idx % 6 + 1) as u64,
+                    payload: "ok",
+                }),
+            )
+            .await
+        }));
+    }
+
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    for idx in (0..handles.len()).step_by(4) {
+        handles[idx].abort();
+    }
+
+    let mut aborted = 0usize;
+    let mut completed = 0usize;
+    for handle in handles {
+        let joined = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("join timeout");
+        match joined {
+            Ok(call_result) => {
+                let response = call_result
+                    .expect("service call should not time out")
+                    .expect("service call should succeed");
+                assert_eq!(response, "ok");
+                completed += 1;
+            }
+            Err(join_err) => {
+                assert!(join_err.is_cancelled(), "unexpected join error: {join_err}");
+                aborted += 1;
+            }
+        }
+    }
+
+    assert!(completed > 0, "at least one request should complete");
+    assert!(aborted > 0, "at least one request should be client-cancelled");
+    assert!(
+        max_active.load(Ordering::SeqCst) <= in_flight_limit,
+        "handler concurrency must stay under in-flight limit"
+    );
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let in_flight_active = inspector.in_flight_active();
+            let queue_len = scheduler.stats().queue_len_estimate;
+            if in_flight_active == 0 && queue_len == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("scheduler should drain without deadlock or semaphore leak");
+
+    scheduler.close();
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        completed + aborted,
+        total_requests,
+        "every spawned request should complete or be cancelled"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
