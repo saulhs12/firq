@@ -1,6 +1,6 @@
 [package]
 name = "firq-examples"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.85"
 publish = false
@@ -14,9 +14,9 @@ keywords = ["examples", "scheduler", "tower", "axum", "tokio"]
 categories = ["asynchronous", "concurrency", "web-programming"]
 
 [dependencies]
-firq-core = { path = "../firq-core", version = "0.1.0" }
-firq-async = { path = "../firq-async", version = "0.1.0" }
-firq-tower = { path = "../firq-tower", version = "0.1.0" }
+firq-core = { path = "../firq-core", version = "0.1.2" }
+firq-async = { path = "../firq-async", version = "0.1.2" }
+firq-tower = { path = "../firq-tower", version = "0.1.2" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net"] }
 axum = "0.7"
 actix-web = "4"

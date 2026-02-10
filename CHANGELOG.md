@@ -8,7 +8,7 @@ The format follows Keep a Changelog principles and this project follows SemVer.
 
 No unreleased changes yet.
 
-## [0.1.1] - 2026-02-10
+## [0.1.2] - 2026-02-10
 
 ### Added
 
