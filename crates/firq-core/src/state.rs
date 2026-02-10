@@ -80,6 +80,7 @@ pub(crate) struct TenantState<T> {
     pub(crate) deficits: [i64; 3],
     pub(crate) quantum: i64,
     pub(crate) active: [bool; 3],
+    pub(crate) enqueue_attempts_since_purge: u32,
 }
 
 impl<T> TenantState<T> {
@@ -89,6 +90,7 @@ impl<T> TenantState<T> {
             deficits: [0; 3],
             quantum,
             active: [false; 3],
+            enqueue_attempts_since_purge: 0,
         }
     }
 
@@ -126,6 +128,7 @@ pub(crate) struct StatsCounters {
     pub(crate) queue_time_sum_ns: AtomicU64,
     pub(crate) queue_time_samples: AtomicU64,
     pub(crate) queue_time_buckets: [AtomicU64; QUEUE_TIME_BUCKETS_NS.len()],
+    pub(crate) enqueue_purge_runs: AtomicU64,
 }
 
 impl StatsCounters {
@@ -143,6 +146,7 @@ impl StatsCounters {
             queue_time_sum_ns: AtomicU64::new(0),
             queue_time_samples: AtomicU64::new(0),
             queue_time_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            enqueue_purge_runs: AtomicU64::new(0),
         }
     }
 }

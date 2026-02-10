@@ -61,7 +61,25 @@ cargo test -p firq-async
 cargo test -p firq-tower --test integration
 cargo check -p firq-examples --bins
 cargo run -p firq-examples --bin async
+cargo run -p firq-examples --bin async_worker
 ```
+
+## How to choose parameters
+
+Use these as starting points, then tune with real traffic and `stats()` metrics.
+
+- `shards`:
+  Start with `min(physical_cores, 8)`. Increase when many tenants are hot concurrently and enqueue lock contention is visible.
+- `max_global` and `max_per_tenant`:
+  Size from memory budget first. Approximate memory as `max_global * avg_task_size`. Keep `max_per_tenant` low enough that one tenant cannot monopolize memory.
+- `quantum` and `cost`:
+  Treat `cost` as "work units" per task, and `quantum` as work units granted per round. If heavy jobs are starving, increase `quantum` or lower heavy-job `cost` calibration.
+- `deadlines`:
+  Use when stale work should be discarded (timeouts/SLO breaches). Expired items are removed lazily and should not permanently consume queue limits.
+- backpressure policy:
+  `Reject` for strict admission control, `DropOldestPerTenant`/`DropNewestPerTenant` for lossy workloads, `Timeout` when producers can wait briefly for capacity.
+
+Queue limits are enforced against live pending work. Cancelled/expired entries are compacted lazily on dequeue and enqueue maintenance passes.
 
 ## Core usage (`firq-core`)
 
@@ -155,6 +173,16 @@ match scheduler.dequeue_async().await {
     DequeueResult::Empty => {}
     DequeueResult::Closed => {}
 }
+
+// Dedicated worker alternative (avoids spawn_blocking per dequeue call).
+let mut receiver = scheduler.receiver_with_worker(1024);
+while let Some(item) = receiver.recv().await {
+    println!(
+        "tenant={} payload={}",
+        item.tenant.as_u64(),
+        item.task.payload
+    );
+}
 ```
 
 ## Axum usage (`firq-tower`)
@@ -183,6 +211,14 @@ let firq_layer = Firq::new()
             .get("X-Tenant-ID")
             .and_then(|h| h.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
+            .or_else(|| {
+                req.headers()
+                    .get("Authorization")
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|raw| raw.strip_prefix("Bearer "))
+                    .and_then(|token| token.strip_prefix("tenant:"))
+                    .and_then(|claim| claim.parse::<u64>().ok())
+            })
             .map(TenantKey::from)
             .unwrap_or(TenantKey::from(0))
     });
@@ -269,6 +305,14 @@ Scenarios:
 - `mixed_priorities`
 - `deadline_expiration`
 - `capacity_pressure`
+
+Smoke run expectation:
+
+- `hot_tenant_sustained`: cold tenants should continue making progress (fairness).
+- `deadline_expiration`: expired counter should increase when work misses deadlines.
+- `capacity_pressure`: rejections/drops should rise as configured limits are reached.
+
+Use these runs to compare parameter sets; do not treat a single run as a universal baseline.
 
 ## Repository layout
 

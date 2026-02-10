@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,25 @@ use crate::state::{
 const SHUTDOWN_OPEN: u8 = 0;
 const SHUTDOWN_DRAIN: u8 = 1;
 const SHUTDOWN_IMMEDIATE: u8 = 2;
+const ENQUEUE_PURGE_INTERVAL: u32 = 32;
+const ENQUEUE_PURGE_NEAR_LIMIT_PERCENT: usize = 90;
+const ENQUEUE_PURGE_SCAN_BUDGET_NEAR: usize = 8;
+const ENQUEUE_PURGE_SCAN_BUDGET_FULL: usize = 32;
+const DEQUEUE_BLOCKING_BACKOFF_SPINS: u32 = 64;
+const DEQUEUE_BLOCKING_BACKOFF_SLEEP: Duration = Duration::from_micros(200);
+
+#[derive(Copy, Clone)]
+enum EnqueuePurgeReason {
+    Periodic,
+    NearLimit,
+    Full,
+}
+
+#[derive(Default)]
+struct PurgeStats {
+    removed_expired_live: u64,
+    released_slots: u64,
+}
 
 /// Multi-tenant in-process scheduler with DRR fairness and explicit backpressure.
 pub struct Scheduler<T> {
@@ -211,6 +230,150 @@ impl<T> Scheduler<T> {
         self.cancelled_ids.lock().remove(&id);
     }
 
+    fn is_expired(deadline: Option<Instant>, now: Instant) -> bool {
+        matches!(deadline, Some(deadline) if now > deadline)
+    }
+
+    fn is_tenant_near_limit(&self, tenant_len: usize) -> bool {
+        let max_per_tenant = self.config.max_per_tenant;
+        if max_per_tenant == 0 {
+            return true;
+        }
+        let lhs = (tenant_len as u128).saturating_mul(100);
+        let rhs = (max_per_tenant as u128).saturating_mul(ENQUEUE_PURGE_NEAR_LIMIT_PERCENT as u128);
+        lhs >= rhs
+    }
+
+    fn maybe_purge_tenant_before_enqueue(
+        &self,
+        tenant_state: &mut TenantState<T>,
+    ) -> Option<EnqueuePurgeReason> {
+        tenant_state.enqueue_attempts_since_purge =
+            tenant_state.enqueue_attempts_since_purge.saturating_add(1);
+
+        let tenant_len = tenant_state.total_len();
+        let reason = if tenant_len >= self.config.max_per_tenant {
+            Some(EnqueuePurgeReason::Full)
+        } else if self.is_tenant_near_limit(tenant_len) {
+            Some(EnqueuePurgeReason::NearLimit)
+        } else if tenant_state.enqueue_attempts_since_purge >= ENQUEUE_PURGE_INTERVAL {
+            Some(EnqueuePurgeReason::Periodic)
+        } else {
+            None
+        };
+
+        if let Some(reason) = reason {
+            let _ = self.purge_tenant_for_enqueue(tenant_state, reason);
+        }
+        reason
+    }
+
+    fn purge_tenant_for_enqueue(
+        &self,
+        tenant_state: &mut TenantState<T>,
+        reason: EnqueuePurgeReason,
+    ) -> PurgeStats {
+        let side_scan_budget = match reason {
+            EnqueuePurgeReason::Periodic => 0,
+            EnqueuePurgeReason::NearLimit => ENQUEUE_PURGE_SCAN_BUDGET_NEAR,
+            EnqueuePurgeReason::Full => ENQUEUE_PURGE_SCAN_BUDGET_FULL,
+        };
+        let now = Instant::now();
+        let stats = self.purge_tenant_with_budget(tenant_state, now, side_scan_budget);
+        tenant_state.enqueue_attempts_since_purge = 0;
+        self.record_enqueue_purge_stats(&stats);
+        stats
+    }
+
+    fn purge_tenant_with_budget(
+        &self,
+        tenant_state: &mut TenantState<T>,
+        now: Instant,
+        side_scan_budget: usize,
+    ) -> PurgeStats {
+        let mut stats = PurgeStats::default();
+        for idx in 0..tenant_state.queues.len() {
+            let queue = &mut tenant_state.queues[idx];
+            self.purge_queue_with_budget(queue, now, side_scan_budget, &mut stats);
+            if queue.is_empty() {
+                tenant_state.active[idx] = false;
+            }
+        }
+        stats
+    }
+
+    fn purge_queue_with_budget(
+        &self,
+        queue: &mut VecDeque<QueueEntry<T>>,
+        now: Instant,
+        side_scan_budget: usize,
+        stats: &mut PurgeStats,
+    ) {
+        while let Some(front) = queue.front() {
+            let front_id = front.id;
+            if self.take_cancelled_marker(front_id) {
+                let _ = queue.pop_front();
+                if self.take_pending(front_id) {
+                    stats.released_slots = stats.released_slots.saturating_add(1);
+                }
+                continue;
+            }
+
+            if Self::is_expired(front.task.deadline, now) {
+                let removed = queue.pop_front().expect("front disappeared");
+                if self.take_pending(removed.id) {
+                    stats.removed_expired_live = stats.removed_expired_live.saturating_add(1);
+                    stats.released_slots = stats.released_slots.saturating_add(1);
+                }
+                continue;
+            }
+            break;
+        }
+
+        if side_scan_budget == 0 || queue.is_empty() {
+            return;
+        }
+
+        let mut idx = 0usize;
+        let mut scanned = 0usize;
+        while idx < queue.len() && scanned < side_scan_budget {
+            scanned = scanned.saturating_add(1);
+            let (entry_id, expired) = {
+                let entry = queue.get(idx).expect("entry should exist");
+                (entry.id, Self::is_expired(entry.task.deadline, now))
+            };
+
+            if self.take_cancelled_marker(entry_id) {
+                let _ = queue.remove(idx).expect("entry should still exist");
+                if self.take_pending(entry_id) {
+                    stats.released_slots = stats.released_slots.saturating_add(1);
+                }
+                continue;
+            }
+
+            if expired {
+                let removed = queue.remove(idx).expect("entry should still exist");
+                if self.take_pending(removed.id) {
+                    stats.removed_expired_live = stats.removed_expired_live.saturating_add(1);
+                    stats.released_slots = stats.released_slots.saturating_add(1);
+                }
+                continue;
+            }
+
+            idx = idx.saturating_add(1);
+        }
+    }
+
+    fn record_enqueue_purge_stats(&self, stats: &PurgeStats) {
+        Self::saturating_add(&self.stats.enqueue_purge_runs, 1);
+        Self::saturating_add(&self.stats.expired, stats.removed_expired_live);
+
+        if stats.released_slots > 0 {
+            self.release_reserved_slots(stats.released_slots);
+            self.work_signal.notify_all();
+        }
+    }
+
     fn quantum_for(&self, tenant: TenantKey) -> u64 {
         if let Some(value) = self.tenant_quantum.read().get(&tenant).copied() {
             return value.max(1);
@@ -399,15 +562,14 @@ impl<T> Scheduler<T> {
                         queue.pop_front();
                         continue;
                     }
-                    match front.task.deadline {
-                        Some(deadline) if now > deadline => {
-                            let expired = queue.pop_front().expect("front disappeared");
-                            if self.take_pending(expired.id) {
-                                expired_count = expired_count.saturating_add(1);
-                                self.release_reserved_slots(1);
-                            }
+                    if Self::is_expired(front.task.deadline, now) {
+                        let expired = queue.pop_front().expect("front disappeared");
+                        if self.take_pending(expired.id) {
+                            expired_count = expired_count.saturating_add(1);
+                            self.release_reserved_slots(1);
                         }
-                        _ => break,
+                    } else {
+                        break;
                     }
                 }
 
@@ -480,9 +642,6 @@ impl<T> Scheduler<T> {
 
     /// Dequeues one task, blocking until work is available or scheduler closes.
     pub fn dequeue_blocking(&self) -> DequeueResult<T> {
-        const BACKOFF_SPINS: u32 = 64;
-        const BACKOFF_SLEEP: Duration = Duration::from_micros(200);
-
         let mut spins = 0u32;
         loop {
             let observed = self.work_signal.current();
@@ -498,10 +657,10 @@ impl<T> Scheduler<T> {
 
                     if self.stats.queue_len_estimate.load(Ordering::Acquire) > 0 {
                         spins = spins.saturating_add(1);
-                        if spins >= BACKOFF_SPINS {
+                        if spins >= DEQUEUE_BLOCKING_BACKOFF_SPINS {
                             let _ = self
                                 .work_signal
-                                .wait_for_change_timeout(observed, BACKOFF_SLEEP);
+                                .wait_for_change_timeout(observed, DEQUEUE_BLOCKING_BACKOFF_SLEEP);
                             spins = 0;
                         } else {
                             std::hint::spin_loop();
@@ -511,6 +670,51 @@ impl<T> Scheduler<T> {
 
                     spins = 0;
                     self.work_signal.wait_for_change(observed);
+                }
+            }
+        }
+    }
+
+    /// Dequeues one task, waiting at most `timeout`.
+    ///
+    /// Returns [`DequeueResult::Empty`] on timeout when the scheduler is still open.
+    pub fn dequeue_blocking_timeout(&self, timeout: Duration) -> DequeueResult<T> {
+        let deadline = Instant::now() + timeout;
+        let mut spins = 0u32;
+
+        loop {
+            let observed = self.work_signal.current();
+            match self.try_dequeue() {
+                DequeueResult::Task { tenant, task } => {
+                    return DequeueResult::Task { tenant, task };
+                }
+                DequeueResult::Closed => return DequeueResult::Closed,
+                DequeueResult::Empty => {
+                    if self.should_return_closed() {
+                        return DequeueResult::Closed;
+                    }
+
+                    if Instant::now() >= deadline {
+                        return DequeueResult::Empty;
+                    }
+
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if self.stats.queue_len_estimate.load(Ordering::Acquire) > 0 {
+                        spins = spins.saturating_add(1);
+                        if spins >= DEQUEUE_BLOCKING_BACKOFF_SPINS {
+                            let wait = remaining.min(DEQUEUE_BLOCKING_BACKOFF_SLEEP);
+                            let _ = self.work_signal.wait_for_change_timeout(observed, wait);
+                            spins = 0;
+                        } else {
+                            std::hint::spin_loop();
+                        }
+                        continue;
+                    }
+
+                    spins = 0;
+                    let _ = self
+                        .work_signal
+                        .wait_for_change_timeout(observed, remaining);
                 }
             }
         }
@@ -575,6 +779,16 @@ impl<T> Scheduler<T> {
             queue_time_histogram,
             top_tenants,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_enqueue_purge_runs(&self) -> u64 {
+        self.stats.enqueue_purge_runs.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_enqueue_purge_interval(&self) -> u32 {
+        ENQUEUE_PURGE_INTERVAL
     }
 
     /// Alias for [`Scheduler::close_immediate`].
@@ -677,11 +891,28 @@ impl<T> Scheduler<T> {
             .entry(tenant)
             .or_insert_with(|| TenantState::new(self.quantum_for(tenant) as i64));
 
+        let purge_reason = self.maybe_purge_tenant_before_enqueue(tenant_state);
+        let mut ran_full_purge = matches!(purge_reason, Some(EnqueuePurgeReason::Full));
+
         if tenant_state.total_len() >= self.config.max_per_tenant {
-            return EnqueueAttempt::Full(task, EnqueueRejectReason::TenantFull);
+            if !ran_full_purge {
+                let _ = self.purge_tenant_for_enqueue(tenant_state, EnqueuePurgeReason::Full);
+                ran_full_purge = true;
+            }
+            if tenant_state.total_len() >= self.config.max_per_tenant {
+                return EnqueueAttempt::Full(task, EnqueueRejectReason::TenantFull);
+            }
         }
 
-        if !self.try_reserve_slot() {
+        let mut reserved = self.try_reserve_slot();
+        if !reserved && !ran_full_purge {
+            let purge = self.purge_tenant_for_enqueue(tenant_state, EnqueuePurgeReason::Full);
+            if purge.released_slots > 0 {
+                reserved = self.try_reserve_slot();
+            }
+        }
+
+        if !reserved {
             return EnqueueAttempt::Full(task, EnqueueRejectReason::GlobalFull);
         }
 
@@ -740,6 +971,9 @@ impl<T> Scheduler<T> {
             .entry(tenant)
             .or_insert_with(|| TenantState::new(self.quantum_for(tenant) as i64));
 
+        let purge_reason = self.maybe_purge_tenant_before_enqueue(tenant_state);
+        let ran_full_purge = matches!(purge_reason, Some(EnqueuePurgeReason::Full));
+
         let current_len = self.stats.queue_len_estimate.load(Ordering::Acquire);
         let tenant_full = tenant_state.total_len() >= self.config.max_per_tenant;
         let global_full = current_len >= self.config.max_global as u64;
@@ -764,9 +998,19 @@ impl<T> Scheduler<T> {
             }
         }
 
-        if !reused_slot && !self.try_reserve_slot() {
-            self.record_reject(EnqueueRejectReason::GlobalFull);
-            return EnqueueWithHandleResult::Rejected(EnqueueRejectReason::GlobalFull);
+        if !reused_slot {
+            let mut reserved = self.try_reserve_slot();
+            if !reserved && !ran_full_purge {
+                let purge = self.purge_tenant_for_enqueue(tenant_state, EnqueuePurgeReason::Full);
+                if purge.released_slots > 0 {
+                    reserved = self.try_reserve_slot();
+                }
+            }
+
+            if !reserved {
+                self.record_reject(EnqueueRejectReason::GlobalFull);
+                return EnqueueWithHandleResult::Rejected(EnqueueRejectReason::GlobalFull);
+            }
         }
 
         let handle = self.next_handle();

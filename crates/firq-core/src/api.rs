@@ -73,7 +73,10 @@ pub struct SchedulerConfig {
     pub shards: usize,
     /// Global queue capacity across all tenants.
     pub max_global: usize,
-    /// Maximum pending tasks per tenant.
+    /// Maximum pending live tasks per tenant.
+    ///
+    /// Cancelled/expired entries are compacted lazily and are not intended to
+    /// consume this limit once reclaimed.
     pub max_per_tenant: usize,
     /// Base DRR quantum for tenants without overrides.
     pub quantum: u64,
@@ -235,7 +238,7 @@ pub struct SchedulerStats {
     pub timeout_rejected: u64,
     /// Total tasks dropped by replacement policies.
     pub dropped_policy: u64,
-    /// Current estimated queue length.
+    /// Current estimated live queue length.
     pub queue_len_estimate: u64,
     /// Configured global queue capacity.
     pub max_global: u64,
