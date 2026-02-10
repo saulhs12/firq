@@ -478,6 +478,103 @@ fn cancel_handle_releases_capacity() {
 }
 
 #[test]
+fn cancelled_entries_do_not_cause_false_tenant_full() {
+    let scheduler = Scheduler::new(config(64, 5));
+    let tenant = TenantKey::from(99);
+
+    let mut handles = Vec::new();
+    for payload in 0..5 {
+        let handle = match scheduler.enqueue_with_handle(tenant, task(payload, None)) {
+            EnqueueWithHandleResult::Enqueued(handle) => handle,
+            other => panic!("expected enqueue handle, got {:?}", other),
+        };
+        handles.push(handle);
+    }
+
+    assert!(matches!(
+        scheduler.cancel(handles[1]),
+        CancelResult::Cancelled
+    ));
+    assert!(matches!(
+        scheduler.cancel(handles[3]),
+        CancelResult::Cancelled
+    ));
+    assert!(matches!(
+        scheduler.cancel(handles[4]),
+        CancelResult::Cancelled
+    ));
+
+    for payload in 10..13 {
+        let result = scheduler.enqueue(tenant, task(payload, None));
+        assert!(
+            matches!(result, EnqueueResult::Enqueued),
+            "enqueue should succeed after tenant purge, got {:?}",
+            result
+        );
+    }
+
+    let stats = scheduler.stats();
+    assert_eq!(
+        stats.queue_len_estimate, 5,
+        "logical queue length should track live tasks only"
+    );
+}
+
+#[test]
+fn expired_entries_do_not_block_future_enqueue() {
+    let scheduler = Scheduler::new(config(64, 3));
+    let tenant = TenantKey::from(77);
+    let expired = Instant::now() - Duration::from_millis(5);
+
+    for payload in 0..3 {
+        assert!(matches!(
+            scheduler.enqueue(tenant, task(payload, Some(expired))),
+            EnqueueResult::Enqueued
+        ));
+    }
+
+    let result = scheduler.enqueue(tenant, task(100, None));
+    assert!(
+        matches!(result, EnqueueResult::Enqueued),
+        "enqueue should reclaim expired backlog, got {:?}",
+        result
+    );
+
+    let stats = scheduler.stats();
+    assert_eq!(stats.expired, 3);
+    assert_eq!(stats.queue_len_estimate, 1);
+}
+
+#[test]
+fn enqueue_purge_is_amortized() {
+    let scheduler = Scheduler::new(config(10_000, 10_000));
+    let tenant = TenantKey::from(1234);
+    let interval = scheduler.debug_enqueue_purge_interval() as u64;
+
+    for payload in 0..interval.saturating_sub(1) {
+        assert!(matches!(
+            scheduler.enqueue(tenant, task(payload, None)),
+            EnqueueResult::Enqueued
+        ));
+    }
+    assert_eq!(
+        scheduler.debug_enqueue_purge_runs(),
+        0,
+        "periodic purge should not run on every enqueue"
+    );
+
+    assert!(matches!(
+        scheduler.enqueue(tenant, task(9_999, None)),
+        EnqueueResult::Enqueued
+    ));
+    assert_eq!(
+        scheduler.debug_enqueue_purge_runs(),
+        1,
+        "periodic purge should run once every configured interval"
+    );
+}
+
+#[test]
 fn global_capacity_is_strict_under_race() {
     let scheduler = Arc::new(Scheduler::new(config(3, 100)));
     let tenants = [TenantKey::from(1), TenantKey::from(2), TenantKey::from(3)];
