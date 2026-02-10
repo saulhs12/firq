@@ -12,6 +12,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: ensure-jq
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
@@ -26,19 +32,27 @@ jobs:
         run: cargo check -p firq-examples --bins
       - name: publish-dry-run-core
         run: cargo publish --dry-run -p firq-core
-      - name: publish-dry-run-async-if-core-published
+      - name: publish-dry-run-async-if-core-version-published
         run: |
-          if cargo search firq-core --limit 1 | grep -q '^firq-core = '; then
+          local_core="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "firq-core") | .version')"
+          remote_core="$(curl -sSL https://crates.io/api/v1/crates/firq-core | jq -r '.crate.max_version // empty')"
+          if [ -n "$remote_core" ] && [ "$remote_core" = "$local_core" ]; then
             cargo publish --dry-run -p firq-async
           else
-            echo "Skipping firq-async dry-run until firq-core is available on crates.io"
+            echo "Skipping firq-async dry-run until firq-core ${local_core} is published (remote=${remote_core:-<none>})"
           fi
-      - name: publish-dry-run-tower-if-async-published
+      - name: publish-dry-run-tower-if-deps-version-published
         run: |
-          if cargo search firq-async --limit 1 | grep -q '^firq-async = '; then
+          local_core="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "firq-core") | .version')"
+          local_async="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "firq-async") | .version')"
+          remote_core="$(curl -sSL https://crates.io/api/v1/crates/firq-core | jq -r '.crate.max_version // empty')"
+          remote_async="$(curl -sSL https://crates.io/api/v1/crates/firq-async | jq -r '.crate.max_version // empty')"
+          if [ -n "$remote_core" ] && [ -n "$remote_async" ] \
+             && [ "$remote_core" = "$local_core" ] \
+             && [ "$remote_async" = "$local_async" ]; then
             cargo publish --dry-run -p firq-tower
           else
-            echo "Skipping firq-tower dry-run until firq-async is available on crates.io"
+            echo "Skipping firq-tower dry-run until firq-core ${local_core} and firq-async ${local_async} are published (remote core=${remote_core:-<none>} async=${remote_async:-<none>})"
           fi
 
   publish:

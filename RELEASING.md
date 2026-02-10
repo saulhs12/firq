@@ -73,6 +73,7 @@ cargo publish --dry-run -p firq-tower
 
 Note: `firq-async` dry-run requires `firq-core` available on crates.io,
 and `firq-tower` dry-run requires both `firq-core` and `firq-async`.
+CI enforces this using exact version checks (not just crate existence).
 
 ## Publish commands
 
