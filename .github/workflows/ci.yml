@@ -49,6 +49,8 @@ jobs:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: ensure-jq
         run: |
@@ -69,10 +71,31 @@ jobs:
           CRATES_IO_API="https://crates.io/api/v1/crates"
           USER_AGENT="firq-publish-ci (https://github.com/saulhs12/firq)"
 
+          event_before="$(jq -r '.before // empty' "$GITHUB_EVENT_PATH")"
+          base_ref=""
+          if [ -n "$event_before" ] && [ "$event_before" != "0000000000000000000000000000000000000000" ]; then
+            base_ref="$event_before"
+            if ! git cat-file -e "${base_ref}^{commit}" 2>/dev/null; then
+              git fetch --no-tags --prune --depth=200 origin "$base_ref" || true
+            fi
+            if ! git cat-file -e "${base_ref}^{commit}" 2>/dev/null; then
+              echo "::warning::unable to resolve push base commit ${base_ref}; changed-crate version check disabled"
+              base_ref=""
+            fi
+          fi
+
           local_version() {
             local crate="$1"
             cargo metadata --no-deps --format-version 1 \
               | jq -r --arg crate "$crate" '.packages[] | select(.name == $crate) | .version'
+          }
+
+          crate_changed_in_push() {
+            local crate="$1"
+            if [ -z "$base_ref" ]; then
+              return 1
+            fi
+            git diff --name-only "$base_ref" "$GITHUB_SHA" -- "crates/${crate}/" | grep -q .
           }
 
           remote_version() {
@@ -124,8 +147,17 @@ jobs:
           for crate in firq-core firq-async firq-tower; do
             local_ver="$(local_version "$crate")"
             remote_ver="$(remote_version "$crate")"
+            changed_in_push=0
+            if crate_changed_in_push "$crate"; then
+              changed_in_push=1
+            fi
+
             echo "${crate}: local=${local_ver} remote=${remote_ver:-<unknown>}"
             if [ -n "$remote_ver" ] && [ "$remote_ver" = "$local_ver" ]; then
+              if [ "$changed_in_push" -eq 1 ]; then
+                echo "::error::${crate} changed in this push but version remained ${local_ver}. bump crates/${crate}/Cargo.toml version before publishing."
+                exit 1
+              fi
               echo "${crate} ${local_ver} already on crates.io; skipping"
               continue
             fi
