@@ -6,6 +6,46 @@
 //! - supports cancellation before execution turn
 //! - enforces in-flight limits with a semaphore
 //! - maps scheduling rejections to HTTP-friendly errors
+//!
+//! # Example (header-style tenant extraction)
+//!
+//! ```rust,no_run
+//! use firq_tower::{Firq, TenantKey};
+//! use std::convert::Infallible;
+//! use std::future::Ready;
+//! use std::task::{Context, Poll};
+//! use tower::{Service, ServiceBuilder};
+//!
+//! #[derive(Clone)]
+//! struct Request {
+//!     x_tenant_id_header: Option<String>,
+//!     body: String,
+//! }
+//!
+//! #[derive(Clone)]
+//! struct EchoService;
+//!
+//! impl Service<Request> for EchoService {
+//!     type Response = String;
+//!     type Error = Infallible;
+//!     type Future = Ready<Result<Self::Response, Self::Error>>;
+//!     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+//!         Poll::Ready(Ok(()))
+//!     }
+//!     fn call(&mut self, req: Request) -> Self::Future {
+//!         std::future::ready(Ok(req.body))
+//!     }
+//! }
+//!
+//! let layer = Firq::new().build(|req: &Request| {
+//!     req.x_tenant_id_header
+//!         .as_deref()
+//!         .and_then(|raw| raw.parse::<u64>().ok())
+//!         .map(TenantKey::from)
+//!         .unwrap_or(TenantKey::from(0))
+//! });
+//! let _svc = ServiceBuilder::new().layer(layer).service(EchoService);
+//! ```
 
 mod builder;
 pub use builder::Firq;

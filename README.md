@@ -25,24 +25,24 @@ Key capabilities:
 
 ```toml
 [dependencies]
-firq-core = "0.1"
+firq-core = "0.1.1"
 ```
 
 Tokio integration:
 
 ```toml
 [dependencies]
-firq-core = "0.1"
-firq-async = "0.1"
+firq-core = "0.1.1"
+firq-async = "0.1.1"
 ```
 
 Tower/Axum integration:
 
 ```toml
 [dependencies]
-firq-core = "0.1"
-firq-async = "0.1"
-firq-tower = "0.1"
+firq-core = "0.1.1"
+firq-async = "0.1.1"
+firq-tower = "0.1.1"
 ```
 
 ### From source
@@ -63,6 +63,21 @@ cargo check -p firq-examples --bins
 cargo run -p firq-examples --bin async
 cargo run -p firq-examples --bin async_worker
 ```
+
+## Stability / SemVer
+
+- Firq is currently in `0.x`; minor releases may include API-breaking changes.
+- Breaking changes include removing/renaming public types/functions, changing enum variants, or changing behavior in a way that requires code changes.
+- Patch releases (`0.1.z`) aim to be backward compatible and focus on fixes/hardening.
+- For production, pin a concrete release (`=0.1.1`) or a conservative range (`~0.1.1`) and review `CHANGELOG.md` before upgrades.
+- MSRV: Rust `1.85+` (`rust-version = "1.85"` in `firq-core`, `firq-async`, and `firq-tower`).
+
+## Getting started on docs.rs
+
+- `firq-core`: https://docs.rs/firq-core and `cargo add firq-core@0.1.1`
+- `firq-async`: https://docs.rs/firq-async and `cargo add firq-async@0.1.1`
+- `firq-tower`: https://docs.rs/firq-tower and `cargo add firq-tower@0.1.1`
+- Minimal, copyable examples are included in each crate-level `lib.rs` docs.
 
 ## How to choose parameters
 
@@ -142,8 +157,7 @@ Use this when producers/consumers are async and run under Tokio.
 
 ```rust
 use firq_async::{
-    AsyncScheduler, DequeueResult, EnqueueResult, Priority, Scheduler, SchedulerConfig, Task,
-    TenantKey,
+    AsyncScheduler, EnqueueResult, Priority, Scheduler, SchedulerConfig, Task, TenantKey,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -166,15 +180,7 @@ match scheduler.enqueue(tenant, task) {
     EnqueueResult::Closed => panic!("closed"),
 }
 
-match scheduler.dequeue_async().await {
-    DequeueResult::Task { task, .. } => {
-        println!("payload={}", task.payload);
-    }
-    DequeueResult::Empty => {}
-    DequeueResult::Closed => {}
-}
-
-// Dedicated worker alternative (avoids spawn_blocking per dequeue call).
+// Recommended for steady consumers: dedicated worker mode.
 let mut receiver = scheduler.receiver_with_worker(1024);
 while let Some(item) = receiver.recv().await {
     println!(
@@ -183,6 +189,9 @@ while let Some(item) = receiver.recv().await {
         item.task.payload
     );
 }
+
+// Fallback for one-off dequeue calls:
+let _ = scheduler.dequeue_async().await;
 ```
 
 ## Axum usage (`firq-tower`)
@@ -298,7 +307,14 @@ Run reproducible scenarios:
 cargo run --release -p firq-bench
 ```
 
-Scenarios:
+Quick smoke run (same binary, full scenario set):
+
+```bash
+cargo build --release -p firq-bench
+./target/release/firq-bench
+```
+
+Scenarios in the benchmark binary include:
 
 - `hot_tenant_sustained`
 - `burst_massive`
@@ -306,13 +322,13 @@ Scenarios:
 - `deadline_expiration`
 - `capacity_pressure`
 
-Smoke run expectation:
+What to observe (without relying on fixed numbers):
 
-- `hot_tenant_sustained`: cold tenants should continue making progress (fairness).
-- `deadline_expiration`: expired counter should increase when work misses deadlines.
-- `capacity_pressure`: rejections/drops should rise as configured limits are reached.
+- Fairness: in `hot_tenant_sustained`, cold tenants should still be served.
+- Queue-time behavior: compare p95/p99 queue-time trends between schedulers.
+- Backpressure/expiry signals: in `capacity_pressure` and `deadline_expiration`, verify drop/reject/expired counters respond as load changes.
 
-Use these runs to compare parameter sets; do not treat a single run as a universal baseline.
+Use runs to compare parameter sets and regressions; do not treat a single run as a universal baseline.
 
 ## Repository layout
 

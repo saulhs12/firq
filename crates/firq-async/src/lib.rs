@@ -5,6 +5,32 @@
 //! - `AsyncReceiver` and `AsyncStream` helpers
 //! - `AsyncWorkerReceiver` for dedicated dequeue-worker mode
 //! - `Dispatcher` with bounded in-flight execution
+//!
+//! # Example (Tokio, worker-backed receiver)
+//!
+//! ```rust,no_run
+//! use firq_async::{AsyncScheduler, EnqueueResult, Priority, Scheduler, SchedulerConfig, Task, TenantKey};
+//! use std::sync::Arc;
+//! use std::time::Instant;
+//!
+//! let scheduler = AsyncScheduler::new(Arc::new(Scheduler::new(SchedulerConfig::default())));
+//! let tenant = TenantKey::from(7);
+//! let task = Task {
+//!     payload: "job",
+//!     enqueue_ts: Instant::now(),
+//!     deadline: None,
+//!     priority: Priority::Normal,
+//!     cost: 1,
+//! };
+//! assert!(matches!(scheduler.enqueue(tenant, task), EnqueueResult::Enqueued));
+//!
+//! let mut receiver = scheduler.receiver_with_worker(64);
+//! let runtime = tokio::runtime::Builder::new_current_thread()
+//!     .build()
+//!     .expect("runtime");
+//! let item = runtime.block_on(async { receiver.recv().await });
+//! assert!(item.is_some());
+//! ```
 
 use std::future::Future;
 use std::pin::Pin;

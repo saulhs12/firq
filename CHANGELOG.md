@@ -6,21 +6,22 @@ The format follows Keep a Changelog principles and this project follows SemVer.
 
 ## [Unreleased]
 
+No unreleased changes yet.
+
+## [0.1.1] - 2026-02-10
+
 ### Added
 
-- Open-source governance files (`CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `SUPPORT.md`).
-- Release process document (`RELEASING.md`) and GitHub templates (`ISSUE_TEMPLATE`, PR template, CODEOWNERS).
-- Baseline API rustdoc for `firq-core`, `firq-async`, and `firq-tower`.
-- Toolchain pin file (`rust-toolchain.toml`) for reproducible local and CI behavior.
+- `firq-core`: enqueue-side stale-entry compaction for cancelled/expired backlog and `dequeue_blocking_timeout`.
+- `firq-async`: dedicated worker-backed dequeue path (`receiver_with_worker`, `stream_with_worker`, `AsyncWorkerReceiver`).
+- `firq-tower`: integration tests for start-order under contention and cancel-before-turn behavior.
+- `firq-examples`: worker-backed async example (`crates/firq-examples/src/bin/async_worker.rs`).
 
 ### Changed
 
-- README rewritten as a public usage manual for core, async, Axum, and Actix-web integrations.
-- CI extended with examples compilation and staged crates.io dry-run checks.
-
-### Removed
-
-- Legacy planning docs that are no longer part of public release assets.
+- `firq-tower`: worker now acquires in-flight capacity (`OwnedSemaphorePermit`) before releasing scheduler turn.
+- README and examples updated with parameter tuning guidance and tenant extraction patterns.
+- CI/release workflows hardened to avoid silent no-op publish and to verify crates.io state before GitHub release creation.
 
 ## [0.1.0] - 2026-02-09
 
